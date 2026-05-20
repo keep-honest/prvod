@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pr_to_video}
+      POSTGRES_USER: ${POSTGRES_USER:-dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dev} -d ${POSTGRES_DB:-pr_to_video}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+      args:
+        VIDEO_COMPOSITOR: ${VIDEO_COMPOSITOR:-ffmpeg}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Database
+      DATABASE_URL: postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-pr_to_video}
+      # API key auth (legacy single-secret mode; works without a seeded admin key)
+      API_SECRET_KEY: ${API_SECRET_KEY:-local-dev-key}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-local-dev-pepper-change-me}
+      # Defaults from Dockerfile.local: SCRIPT_WRITER=claude-cli, USE_LOCAL_STORAGE=true, USE_BUILTIN_TTS=true
+      # Override here for Google TTS, R2 storage, etc.
+      USE_BUILTIN_TTS: ${USE_BUILTIN_TTS:-true}
+      USE_LOCAL_STORAGE: ${USE_LOCAL_STORAGE:-true}
+      SCRIPT_WRITER: ${SCRIPT_WRITER:-claude-cli}
+      # GitHub App (optional; only needed for the webhook flow)
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_WEBHOOK_SECRET: ${GITHUB_APP_WEBHOOK_SECRET:-}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+      # Share-link signing for /watch/[jobId]
+      SHARE_SIGNING_SECRET: ${SHARE_SIGNING_SECRET:-local-dev-share-secret}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      # Mount the host's Claude Code auth so SCRIPT_WRITER=claude-cli works without an API key
+      - ${HOME}/.claude:/root/.claude
+      # Persist generated outputs to host when USE_LOCAL_STORAGE=true
+      - ./output:/app/output
+
+volumes:
+  pgdata:

@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Build
+dist/
+build/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Database
+drizzle/meta/
+
+# Local storage (video output)
+.local-storage/
+
+# Remotion
+remotion-bundle/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.tmp
+*.log
+
+# Test coverage
+coverage/
+playwright-report/
+test-results/
+
+# Debug logs
+npm-debug.log*
