@@ -1,0 +1,38 @@
+# Local dev image — includes Claude Code CLI, FFmpeg, and git
+FROM node:22-slim
+ARG VIDEO_COMPOSITOR=ffmpeg
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+# Always install all packages — next build compiles Remotion source files
+# even when VIDEO_COMPOSITOR=ffmpeg (static imports need type definitions).
+RUN npm ci
+COPY . .
+RUN npm run build
+# Standalone mode requires static assets + full node_modules
+# (externalized packages are excluded from standalone tracing)
+RUN cp -r .next/static .next/standalone/.next/static \
+    && rm -rf .next/standalone/node_modules \
+    && ln -s /app/node_modules .next/standalone/node_modules
+# Remove Remotion packages from runtime when not needed.
+# NOTE: Cannot use npm prune --omit=optional — that also strips native
+# platform binaries from sharp and @node-rs/argon2.
+RUN if [ "$VIDEO_COMPOSITOR" != "remotion" ]; then \
+      rm -rf node_modules/@remotion node_modules/remotion; \
+    fi
+
+ENV NODE_ENV=production
+ENV VIDEO_COMPOSITOR=$VIDEO_COMPOSITOR
+ENV SCRIPT_WRITER=claude-cli
+ENV USE_LOCAL_STORAGE=true
+ENV USE_BUILTIN_TTS=true
+
+EXPOSE 3000
+
+CMD ["node", ".next/standalone/server.js"]
