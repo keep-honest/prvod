@@ -328,6 +328,141 @@ describe("CliScriptWriter", () => {
   });
 });
 
+describe("CliScriptWriter.completeJson typed-error contract", () => {
+  // Schema validation failures must throw StructuredOutputValidationError carrying
+  // rawJson + ZodError so the runner's completeJsonWithRepair wrapper can route
+  // the failure into repairLoop instead of crashing the whole pipeline. Two
+  // distinct throw sites: the Claude-envelope path and the generic-stdout path.
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.PROMPT_PIPELINE_V2 = "true";
+  });
+  afterEach(() => {
+    delete process.env.PROMPT_PIPELINE_V2;
+  });
+
+  async function captureModelCompleteJson(): Promise<
+    NonNullable<Parameters<typeof import("@/infrastructure/llm/promptPipelineV2Runner").generateScriptWithPromptPipelineV2>[0]["model"]["completeJson"]>
+  > {
+    const v2Runner = await import("@/infrastructure/llm/promptPipelineV2Runner");
+    let captured: Parameters<typeof v2Runner.generateScriptWithPromptPipelineV2>[0]["model"]["completeJson"] | undefined;
+    const spy = vi.spyOn(v2Runner, "generateScriptWithPromptPipelineV2");
+    spy.mockImplementation(async (input) => {
+      captured = input.model.completeJson;
+      return {
+        script: VALID_SCRIPT as unknown as Awaited<ReturnType<typeof v2Runner.generateScriptWithPromptPipelineV2>>["script"],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      };
+    });
+    const writer = new CliScriptWriter();
+    await writer.generateScript(fakePRContext, fakeDiffAnalysis);
+    spy.mockRestore();
+    if (!captured) throw new Error("completeJson not captured");
+    return captured;
+  }
+
+  it("Claude-envelope path: throws StructuredOutputValidationError on Zod fail, with rawJson = JSON.stringify(envelope.data)", async () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "",
+      structured_output: { wrong: "shape" },
+    });
+    (execFile as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+        const child = { stdin: { write: vi.fn(), end: vi.fn(), on: vi.fn() } };
+        cb(null, envelope, "");
+        return child;
+      },
+    );
+    const completeJson = await captureModelCompleteJson();
+    const { z } = await import("zod");
+    const { StructuredOutputValidationError } = await import("@/infrastructure/llm/promptPipelineV2Repair");
+    const schema = z.object({ required: z.string() });
+
+    let thrown: unknown;
+    try {
+      await completeJson("sys", "user", schema, { schemaName: "test_envelope" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(StructuredOutputValidationError);
+    const typed = thrown as InstanceType<typeof StructuredOutputValidationError>;
+    expect(typed.schemaName).toBe("test_envelope");
+    expect(typed.rawJson).toBe(JSON.stringify({ wrong: "shape" }, null, 2));
+    expect(typed.zodError.issues.length).toBeGreaterThan(0);
+    expect(typed.message).toContain("structured output");
+    expect(typed.cause).toBe(typed.zodError);
+  });
+
+  it("generic path: throws StructuredOutputValidationError on Zod fail, with rawJson = post-repair cleaned string", async () => {
+    // Plain JSON output (no Claude envelope detected) with schema-invalid shape.
+    const rawOutput = '{"wrong":"shape"}';
+    (execFile as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+        const child = { stdin: { write: vi.fn(), end: vi.fn(), on: vi.fn() } };
+        cb(null, rawOutput, "");
+        return child;
+      },
+    );
+    const completeJson = await captureModelCompleteJson();
+    const { z } = await import("zod");
+    const { StructuredOutputValidationError } = await import("@/infrastructure/llm/promptPipelineV2Repair");
+    const schema = z.object({ required: z.string() });
+
+    let thrown: unknown;
+    try {
+      await completeJson("sys", "user", schema, { schemaName: "test_generic" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(StructuredOutputValidationError);
+    const typed = thrown as InstanceType<typeof StructuredOutputValidationError>;
+    expect(typed.schemaName).toBe("test_generic");
+    expect(typed.rawJson).toContain('"wrong"'); // post-jsonrepair string
+    expect(typed.zodError.issues.length).toBeGreaterThan(0);
+    expect(typed.cause).toBe(typed.zodError);
+  });
+
+  it("non-object plain text: routes through jsonrepair → Zod fail → typed error (NOT plain Error)", async () => {
+    // CLI architecture: stdout passes through `repairCliJson` (jsonrepair) BEFORE
+    // JSON.parse. jsonrepair coerces unparseable text into a JSON string literal,
+    // then JSON.parse succeeds returning that string, then schema.parse rejects
+    // (expected object). So the realistic CLI failure mode for "model emitted
+    // non-JSON text" is the Zod path — deterministically the typed error.
+    //
+    // The JSON.parse-throws path inside completeJson is essentially unreachable
+    // for the CLI because jsonrepair either returns valid JSON or throws first.
+    // That throw escapes uncaught (callers of completeJson see a raw JSONRepairError),
+    // which is a separate concern outside the typed-error contract.
+    (execFile as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+        const child = { stdin: { write: vi.fn(), end: vi.fn(), on: vi.fn() } };
+        cb(null, "this is definitely not json", "");
+        return child;
+      },
+    );
+    const completeJson = await captureModelCompleteJson();
+    const { z } = await import("zod");
+    const { StructuredOutputValidationError } = await import("@/infrastructure/llm/promptPipelineV2Repair");
+    const schema = z.object({ ok: z.boolean() });
+
+    let thrown: unknown;
+    try {
+      await completeJson("sys", "user", schema, { schemaName: "test_text_to_zod" });
+    } catch (err) {
+      thrown = err;
+    }
+    // Deterministic: text → jsonrepair string → JSON.parse string → Zod expects object.
+    expect(thrown).toBeInstanceOf(StructuredOutputValidationError);
+    const typed = thrown as InstanceType<typeof StructuredOutputValidationError>;
+    expect(typed.schemaName).toBe("test_text_to_zod");
+    expect(typed.zodError.issues.some((i) => i.code === "invalid_type")).toBe(true);
+    expect(typed.cause).toBe(typed.zodError);
+  });
+});
+
 describe("extractClaudeCliStructuredOutput", () => {
   const logger = createLogger("test");
 

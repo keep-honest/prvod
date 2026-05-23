@@ -60,7 +60,7 @@ import {
   validateTotalWordBudget,
 } from "@/infrastructure/llm/promptPipelineV2Validators";
 import type { ReviewConcern, ReviewPosture } from "@/domain/entities/PromptPipelineV2";
-import { tryParseJson, tryValidate, repairLoop, isLlmValidationError, getMaxRepairAttempts } from "@/infrastructure/llm/promptPipelineV2Repair";
+import { tryParseJson, tryValidate, repairLoop, isLlmValidationError, getMaxRepairAttempts, completeJsonWithRepair } from "@/infrastructure/llm/promptPipelineV2Repair";
 import {
   computeActualNarrationDurationSeconds,
   computeDurationSecondsFromWordCount,
@@ -73,6 +73,31 @@ import {
 } from "@/lib/durationGuard";
 
 const logger = createLogger("PromptPipelineV2Runner");
+
+// Shape reminder passed to `repairLoop` for non-VideoScript schemas. The
+// default reminder describes the VideoScript shape, which would confuse the
+// LLM when repairing a coverage_plan or scene_outline payload — pass these
+// as `shapeHint` overrides so the LLM sees the right schema in the repair
+// prompt.
+const COVERAGE_PLAN_REPAIR_SHAPE_HINT = [
+  "Return JSON with this exact shape:",
+  "{",
+  '  "summary": string,',
+  '  "selectedEvidencePolicy": string,',
+  '  "clusters": [{ "clusterId": string, "title": string, "files": [string]+, "evidenceSnippets": [{ "filePath": string, "summary": string, "diffExcerpt": string }]+, "technicalMechanism": string, "impact": string, "riskIfAbsent": string, "validationEvidence": [string]+, "importanceRank": number }]+,',
+  '  "ledger": [{ "clusterId": string, "disposition": "deep_dive"|"summary"|"omitted_low_priority", "reason": string }]+,',
+  '  "majorClusterIds": [string]',
+  "}",
+  "Arrays marked with + require at least 1 element. Every cluster must have at least one validationEvidence entry naming the test, guard, or invariant.",
+].join("\n");
+
+const SCENE_OUTLINE_REPAIR_SHAPE_HINT = [
+  "Return JSON with this exact shape:",
+  "{",
+  '  "scenes": [{ "sceneNumber": number, "sceneType": "overview"|"hook"|"code_walkthrough"|"before_after"|"architecture"|"summary"|"closing", "title": string, "clusterIds": [string], "evidenceFilePaths": [string], "whatChanged": string, "whyItMatters": string, "failureWithoutIt": string, "validation": string, "visualFocus": string }]+',
+  "}",
+  "scenes must be non-empty.",
+].join("\n");
 
 export interface CompleteJsonOptions {
   maxTokens?: number;
@@ -511,30 +536,33 @@ async function generateAndRefineScript(input: {
   const canRepairWithText = Boolean(model.completeText);
   const scriptGenStart = Date.now();
   if (model.supportsNativeStructuredOutput) {
-    const transportScript = await model.completeJson(
-      buildFinalScriptSystemPrompt(promptContext, validDurations),
-      buildFinalScriptUserPrompt(
+    // Native structured output path: completeJson throws
+    // `StructuredOutputValidationError` on Zod failure. `completeJsonWithRepair`
+    // catches it and runs `repairLoop` against the original ZodError. (The
+    // older `tryValidate` + `repairLoop` pattern that used to live here was
+    // dead: completeJson either rejected with a plain Error that bypassed
+    // tryValidate entirely, or resolved with an already-Zod-validated value,
+    // in which case the re-validate always succeeded and repair never fired.)
+    const transportScript = await completeJsonWithRepair({
+      model,
+      system: buildFinalScriptSystemPrompt(promptContext, validDurations),
+      userPrompt: buildFinalScriptUserPrompt(
         model.family,
         context,
         analysis,
         approvedCoverage,
         sceneOutline,
       ),
-      videoScriptTransportSchema,
-      { maxTokens: 12288, schemaName: "video_script" },
-    );
-    const nativeValidateSchema = videoScriptTransportSchema;
-    let parseResult = tryValidate(transportScript, nativeValidateSchema);
-    if (!parseResult.success && canRepairWithText && model.completeText) {
-      parseResult = await repairLoop(parseResult, nativeValidateSchema, {
-        completeText: model.completeText,
+      schema: videoScriptTransportSchema,
+      options: { maxTokens: 12288, schemaName: "video_script" },
+      repair: {
+        ...(model.completeText !== undefined ? { completeText: model.completeText } : {}),
         promptContext,
         validDurations,
         label: "final_script",
-      });
-    }
-    if (!parseResult.success) throw parseResult.zodError;
-    script = deriveScriptFromTransport(parseResult.data);
+      },
+    });
+    script = deriveScriptFromTransport(transportScript);
   } else if (canRepairWithText && model.completeText) {
     // Use raw text generation only when native structured output is unavailable.
     const scriptRaw = await model.completeText(
@@ -910,23 +938,24 @@ async function runBatchedFinalScriptPass(input: {
 
     if (isFirst) {
       // First batch: envelope schema (allows 1 scene) → gets envelope fields + overview scene
-      const transportScript = await model.completeJson(
-        systemPrompt, userPrompt, batchEnvelopeTransportSchema,
-        { maxTokens: 8192, schemaName: "batch_envelope" },
-      );
-      let parseResult = tryValidate(transportScript, batchEnvelopeTransportSchema);
-      if (!parseResult.success && canRepairWithText && model.completeText) {
-        parseResult = await repairLoop(parseResult, batchEnvelopeTransportSchema, {
-          completeText: model.completeText,
+      // Native structured-output Zod failures route through completeJsonWithRepair
+      // → repairLoop instead of crashing the whole batched pipeline.
+      const transportScript = await completeJsonWithRepair({
+        model,
+        system: systemPrompt,
+        userPrompt,
+        schema: batchEnvelopeTransportSchema,
+        options: { maxTokens: 8192, schemaName: "batch_envelope" },
+        repair: {
+          ...(model.completeText !== undefined ? { completeText: model.completeText } : {}),
           promptContext,
           validDurations,
           label: "batch_0_script",
           shapeHint: batchEnvelopeShapeHint,
           systemPrompt,
-        });
-      }
-      if (!parseResult.success) throw parseResult.zodError;
-      scriptEnvelope = parseResult.data as unknown as VideoScript;
+        },
+      });
+      scriptEnvelope = transportScript as unknown as VideoScript;
       // Only accept scenes the batch was asked to produce (prevents model from
       // emitting later scenes that would duplicate with subsequent batches).
       const requestedSceneNumbers = new Set(batch.map((s) => s.sceneNumber));
@@ -942,31 +971,30 @@ async function runBatchedFinalScriptPass(input: {
       allScenes.push(...acceptedScenes);
     } else {
       // Subsequent batches: lightweight batch schema → only scenes
-      const batchOutput = await model.completeJson(
-        systemPrompt, userPrompt, batchScenesTransportSchema,
-        { maxTokens: 6144, schemaName: "batch_scenes" },
-      );
-      let parseResult = tryValidate(batchOutput, batchScenesTransportSchema);
-      if (!parseResult.success && canRepairWithText && model.completeText) {
-        parseResult = await repairLoop(parseResult, batchScenesTransportSchema, {
-          completeText: model.completeText,
+      const batchOutput = await completeJsonWithRepair({
+        model,
+        system: systemPrompt,
+        userPrompt,
+        schema: batchScenesTransportSchema,
+        options: { maxTokens: 6144, schemaName: "batch_scenes" },
+        repair: {
+          ...(model.completeText !== undefined ? { completeText: model.completeText } : {}),
           promptContext,
           validDurations,
           label: `batch_${batchIdx}_scenes`,
           shapeHint: batchScenesShapeHint,
           systemPrompt,
-        });
-      }
-      if (!parseResult.success) throw parseResult.zodError;
+        },
+      });
       // Only accept scenes this batch was asked to produce
       const requestedSceneNumbers = new Set(batch.map((s) => s.sceneNumber));
-      const batchScenes = parseResult.data.scenes.filter(
+      const batchScenes = batchOutput.scenes.filter(
         (s: Scene) => requestedSceneNumbers.has(s.sceneNumber),
       );
-      if (batchScenes.length < parseResult.data.scenes.length) {
+      if (batchScenes.length < batchOutput.scenes.length) {
         logger.warn(`Batch ${batchIdx} returned extra scenes beyond requested set — trimming`, {
           requested: [...requestedSceneNumbers],
-          returned: parseResult.data.scenes.map((s: Scene) => s.sceneNumber),
+          returned: batchOutput.scenes.map((s: Scene) => s.sceneNumber),
         });
       }
       allScenes.push(...batchScenes);
@@ -1274,17 +1302,31 @@ export async function generateScriptWithPromptPipelineV2(
 
   logger.info("V2 pipeline [1/7]: Running coverage planner...");
   const stage1Start = Date.now();
-  const plannedCoverage = await model.completeJson(
-    buildCoveragePlannerSystemPrompt(promptContext),
-    buildCoveragePlannerUserPrompt(
+  const coveragePlannerSystemPrompt = buildCoveragePlannerSystemPrompt(promptContext);
+  const plannedCoverage = await completeJsonWithRepair({
+    model,
+    system: coveragePlannerSystemPrompt,
+    userPrompt: buildCoveragePlannerUserPrompt(
       promptContext,
       context,
       analysis,
       context.durationMode,
     ),
-    coveragePlanSchema,
-    { maxTokens: 8192, schemaName: "coverage_plan" },
-  );
+    schema: coveragePlanSchema,
+    options: { maxTokens: 8192, schemaName: "coverage_plan" },
+    // Retry-with-feedback: a single malformed cluster (e.g. empty
+    // validationEvidence array, missing required field) used to kill the
+    // entire 7-stage job. With repair, the LLM gets a chance to fix the
+    // specific Zod errors and return corrected JSON before we give up.
+    repair: {
+      ...(model.completeText !== undefined ? { completeText: model.completeText } : {}),
+      promptContext,
+      validDurations,
+      label: "coverage_plan",
+      systemPrompt: coveragePlannerSystemPrompt,
+      shapeHint: COVERAGE_PLAN_REPAIR_SHAPE_HINT,
+    },
+  });
   logger.info(`V2 pipeline [1/7]: Coverage planner complete (${elapsed(stage1Start)}s)`, {
     clusterCount: plannedCoverage.clusters.length,
     majorClusterCount: plannedCoverage.majorClusterIds.length,
@@ -1340,12 +1382,26 @@ export async function generateScriptWithPromptPipelineV2(
 
   logger.info("V2 pipeline [3/7]: Running scene outline...");
   const stage3Start = Date.now();
-  let sceneOutline = await model.completeJson(
-    buildSceneOutlineSystemPrompt(promptContext),
-    buildSceneOutlineUserPrompt(model.family, context, approvedCoverage),
-    sceneOutlineSchema,
-    { maxTokens: 8192, schemaName: "scene_outline" },
-  );
+  const sceneOutlineSystemPrompt = buildSceneOutlineSystemPrompt(promptContext);
+  let sceneOutline = await completeJsonWithRepair({
+    model,
+    system: sceneOutlineSystemPrompt,
+    userPrompt: buildSceneOutlineUserPrompt(model.family, context, approvedCoverage),
+    schema: sceneOutlineSchema,
+    options: { maxTokens: 8192, schemaName: "scene_outline" },
+    // Schema-level repair runs BEFORE the existing business-validation
+    // repair below (validateSceneOutlineConsistency). A scene_outline that
+    // fails Zod (e.g. empty scenes array, missing required field) now
+    // gets a text-mode retry instead of throwing.
+    repair: {
+      ...(model.completeText !== undefined ? { completeText: model.completeText } : {}),
+      promptContext,
+      validDurations,
+      label: "scene_outline_schema",
+      systemPrompt: sceneOutlineSystemPrompt,
+      shapeHint: SCENE_OUTLINE_REPAIR_SHAPE_HINT,
+    },
+  });
 
   // Auto-fix: strip evidence files not belonging to the scene's clusters
   const { sceneOutline: fixedOutline, stripped } = stripInvalidEvidenceFileRefs(approvedCoverage, sceneOutline);

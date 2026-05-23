@@ -648,3 +648,97 @@ describe("ClaudeScriptWriter", () => {
       .rejects.toThrow(/truncated/i);
   });
 });
+
+describe("ClaudeScriptWriter.completeJson typed-error contract", () => {
+  // Schema validation failures must throw StructuredOutputValidationError carrying
+  // rawJson + ZodError so completeJsonWithRepair can route the failure into
+  // repairLoop. Claude SDK writer's throw site is distinct from CLI / Gemini:
+  // rawJson = the raw `textBlock.text` (not parsed, not jsonrepaired).
+
+  beforeEach(() => {
+    process.env.PROMPT_PIPELINE_V2 = "true";
+  });
+  afterEach(() => {
+    delete process.env.PROMPT_PIPELINE_V2;
+    vi.restoreAllMocks();
+  });
+
+  async function captureModelCompleteJson(client: Anthropic): Promise<
+    NonNullable<Parameters<typeof import("@/infrastructure/llm/promptPipelineV2Runner").generateScriptWithPromptPipelineV2>[0]["model"]["completeJson"]>
+  > {
+    const v2Runner = await import("@/infrastructure/llm/promptPipelineV2Runner");
+    let captured: Parameters<typeof v2Runner.generateScriptWithPromptPipelineV2>[0]["model"]["completeJson"] | undefined;
+    const spy = vi.spyOn(v2Runner, "generateScriptWithPromptPipelineV2");
+    spy.mockImplementation(async (input) => {
+      captured = input.model.completeJson;
+      return {
+        script: VALID_SCRIPT as unknown as Awaited<ReturnType<typeof v2Runner.generateScriptWithPromptPipelineV2>>["script"],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      };
+    });
+    const writer = new ClaudeScriptWriter(client);
+    await writer.generateScript(fakePRContext, fakeDiffAnalysis);
+    spy.mockRestore();
+    if (!captured) throw new Error("completeJson not captured");
+    return captured;
+  }
+
+  it("throws StructuredOutputValidationError on Zod failure with rawJson = raw textBlock.text", async () => {
+    const invalidPayload = JSON.stringify({ wrong: "shape" });
+    const client = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: invalidPayload }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+      },
+    } as unknown as Anthropic;
+
+    const completeJson = await captureModelCompleteJson(client);
+    const { z } = await import("zod");
+    const { StructuredOutputValidationError } = await import("@/infrastructure/llm/promptPipelineV2Repair");
+    const schema = z.object({ required: z.string() });
+
+    let thrown: unknown;
+    try {
+      await completeJson("sys", "user", schema, { schemaName: "test_claude_zod" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(StructuredOutputValidationError);
+    const typed = thrown as InstanceType<typeof StructuredOutputValidationError>;
+    expect(typed.schemaName).toBe("test_claude_zod");
+    expect(typed.rawJson).toBe(invalidPayload); // raw textBlock.text, no JSON.stringify, no jsonrepair
+    expect(typed.zodError.issues.length).toBeGreaterThan(0);
+    expect(typed.message).toContain("structured output");
+    expect(typed.cause).toBe(typed.zodError);
+  });
+
+  it("throws plain Error (NOT typed) on JSON syntax failure", async () => {
+    const client = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "{ not valid json" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+      },
+    } as unknown as Anthropic;
+
+    const completeJson = await captureModelCompleteJson(client);
+    const { z } = await import("zod");
+    const { StructuredOutputValidationError } = await import("@/infrastructure/llm/promptPipelineV2Repair");
+    const schema = z.object({ ok: z.boolean() });
+
+    let thrown: unknown;
+    try {
+      await completeJson("sys", "user", schema, { schemaName: "test_claude_syntax" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).not.toBeInstanceOf(StructuredOutputValidationError);
+    expect((thrown as Error).message).toContain("structured output");
+  });
+});
