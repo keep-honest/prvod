@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
-import type { ZodTypeAny, infer as ZodInfer } from "zod";
+import { ZodError, type ZodTypeAny, type infer as ZodInfer } from "zod";
+import { StructuredOutputValidationError } from "@/infrastructure/llm/promptPipelineV2Repair";
 import { createLogger } from "@/lib/logger";
 import {
   DEFAULT_MODE_MAX_DURATION,
@@ -415,15 +416,41 @@ export class ClaudeScriptWriter implements IScriptWriter {
             if (!textBlock || textBlock.type !== "text") {
               throw new Error(`Claude API structured output returned no text block for ${schemaName}`);
             }
+            // Split JSON syntax errors from Zod validation errors so the runner can
+            // hand schema-validation failures to repairLoop for retry-with-feedback.
+            let parsed: unknown;
             try {
-              return schema.parse(JSON.parse(textBlock.text));
+              parsed = JSON.parse(textBlock.text);
             } catch (err) {
-              logger.error("Claude structured output parse/validate failed", {
+              logger.error("Claude structured output JSON parse failed", {
                 schemaName,
                 rawTextPreview: textBlock.text.slice(0, 500),
                 stopReason: response.stop_reason,
                 error: err instanceof Error ? err.message : String(err),
               });
+              throw new Error(
+                `Claude structured output for "${schemaName}" failed: ${err instanceof Error ? err.message : String(err)}`,
+                { cause: err },
+              );
+            }
+            try {
+              return schema.parse(parsed);
+            } catch (err) {
+              logger.error("Claude structured output schema validation failed", {
+                schemaName,
+                rawTextPreview: textBlock.text.slice(0, 500),
+                stopReason: response.stop_reason,
+                error: err instanceof Error ? err.message : String(err),
+              });
+              if (err instanceof ZodError) {
+                throw new StructuredOutputValidationError(
+                  `Claude structured output for "${schemaName}" failed: ${err.message}`,
+                  textBlock.text,
+                  err,
+                  schemaName,
+                  { cause: err },
+                );
+              }
               throw new Error(`Claude structured output for "${schemaName}" failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           },
