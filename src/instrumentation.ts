@@ -67,4 +67,41 @@ export async function register() {
     );
     process.exit(1);
   }
+
+  // Prefetch Chrome Headless Shell so the first render does not block on a
+  // ~110 MB download. Gated on the active compositor — the ffmpeg path never
+  // touches a browser. Failure is non-fatal because the renderer's lazy
+  // download covers transient network blips. Non-transient classes (missing
+  // package, EACCES/EROFS, ENOSPC) will recur at render time as user-facing
+  // failures — we log enough context here so an operator triaging from logs
+  // can tell network failure from disk-full from configuration drift.
+  if (process.env.VIDEO_COMPOSITOR === "remotion") {
+    const startedAt = Date.now();
+    try {
+      // @remotion/renderer pulls Node-only transitive deps (child_process via
+      // execa/cross-spawn). Keep this as a runtime Node import so Next's
+      // instrumentation bundle does not try to resolve those deps for webpack.
+      const { ensureBrowser } = await import(
+        /* webpackIgnore: true */ "@remotion/renderer"
+      );
+      await ensureBrowser();
+      console.log("[startup] chrome-headless-shell ready", {
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException & {
+        cause?: { message?: string };
+      };
+      console.warn(
+        "[startup] ensureBrowser failed — first render will pay the download cost:",
+        {
+          durationMs: Date.now() - startedAt,
+          code: err?.code,
+          name: err?.name,
+          message: err?.message,
+          cause: err?.cause?.message,
+        },
+      );
+    }
+  }
 }
