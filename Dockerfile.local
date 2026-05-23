@@ -10,9 +10,12 @@ RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY scripts/ensure-remotion-browser.mjs ./scripts/ensure-remotion-browser.mjs
 # Always install all packages — next build compiles Remotion source files
 # even when VIDEO_COMPOSITOR=ffmpeg (static imports need type definitions).
-RUN npm ci
+# Re-export the ARG so the package.json postinstall hook can pre-fetch
+# chrome-headless-shell when VIDEO_COMPOSITOR=remotion.
+RUN VIDEO_COMPOSITOR=$VIDEO_COMPOSITOR npm ci
 COPY . .
 RUN npm run build
 # Standalone mode requires static assets + full node_modules

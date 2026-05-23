@@ -41,7 +41,8 @@
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio",
-    "admin:create-api-key": "npx tsx scripts/create-admin-api-key.ts"
+    "admin:create-api-key": "npx tsx scripts/create-admin-api-key.ts",
+    "postinstall": "node scripts/ensure-remotion-browser.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
