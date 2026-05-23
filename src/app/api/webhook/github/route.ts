@@ -11,6 +11,7 @@ import type { InstallationRecord } from "@/interfaces/IInstallationRepository";
 import type { IPipelineCheckpointStore } from "@/interfaces/IPipelineCheckpoint";
 import { buildErrorComment } from "@/app/api/webhook/github/errorComment";
 import { createPipelineRunner } from "@/app/api/pipelineFactory";
+import { describeGitHubError } from "@/infrastructure/github/githubFetch";
 
 const logger = createLogger("webhook/github");
 
@@ -933,6 +934,15 @@ async function handleAnnotatedTrigger(
             jobId: existingJob.id,
           });
         } catch (err) {
+          logger.error("Failed to replay missed PR comment on redelivery", {
+            repoFullName,
+            prNumber,
+            jobId: existingJob.id,
+            commentType,
+            deliveryId,
+            error: err instanceof Error ? err.message : String(err),
+            errorDetails: describeGitHubError(err),
+          });
           await safeUpdateDeliveryStatus(
             container,
             deliveryId,
@@ -1034,6 +1044,7 @@ async function handleAnnotatedTrigger(
         logger.error("Failed to post rate-limit comment — user will not see feedback on PR", {
           repoFullName, prNumber, deliveryId, installationId: installation.installationId,
           error: commentErr instanceof Error ? commentErr.message : String(commentErr),
+          errorDetails: describeGitHubError(commentErr),
         });
       }
       await safeUpdateDeliveryStatus(container, deliveryId, "skipped", "rate_limit_exceeded");
@@ -1227,6 +1238,7 @@ async function handleAnnotatedTrigger(
       logger.warn("Failed to post acknowledgement comment — proceeding with pipeline", {
         jobId: job.id, repoFullName, prNumber,
         error: postErr instanceof Error ? postErr.message : String(postErr),
+        errorDetails: describeGitHubError(postErr),
       });
     }
     if (ackPosted) {
@@ -1267,6 +1279,7 @@ async function handleAnnotatedTrigger(
           commentType,
           videoUrl: finalJob.videoUrl ?? null,
           error: commentErr instanceof Error ? commentErr.message : String(commentErr),
+          errorDetails: describeGitHubError(commentErr),
         });
         void safeUpdateDeliveryStatus(
           container,
@@ -1298,6 +1311,7 @@ async function handleAnnotatedTrigger(
         logger.error("Failed to post error comment after pipeline failure", {
           jobId: job.id,
           error: commentErr instanceof Error ? commentErr.message : String(commentErr),
+          errorDetails: describeGitHubError(commentErr),
         });
       }
       void safeUpdateDeliveryStatus(

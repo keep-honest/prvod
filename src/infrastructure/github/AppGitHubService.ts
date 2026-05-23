@@ -1,5 +1,4 @@
 import { createLogger } from "@/lib/logger";
-import { sanitizeErrorBody } from "@/lib/sanitize";
 import type {
   DiscardPendingReviewParams,
   IGitHubService,
@@ -9,40 +8,19 @@ import type {
 import type { PRContext } from "@/domain/entities/PRContext";
 import { prContextSchema } from "@/domain/entities/PRContext";
 import type { GitHubAppTokenService } from "./GitHubAppTokenService";
+import { GITHUB_API, githubFetch } from "./githubFetch";
 
 const logger = createLogger("AppGitHubService");
 
-const GITHUB_API = "https://api.github.com";
 const MAX_LINKED_ISSUES = 5;
 
-async function ghFetch(
-  url: string,
-  token: string,
-  extra?: Record<string, string>,
-): Promise<Response> {
-  logger.debug("GitHub API request", { url });
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      ...extra,
-    },
-  });
-  if (!res.ok) {
-    let body: string;
-    try {
-      body = sanitizeErrorBody(await res.text());
-    } catch (readErr) {
-      body = "[body unreadable]";
-      logger.debug("Could not read error response body", {
-        error: readErr instanceof Error ? readErr.message : String(readErr),
-      });
-    }
-    logger.error("GitHub API error", { url, status: res.status, body });
-    throw new Error(`GitHub API ${res.status}: ${body}`);
-  }
-  return res;
+function githubHeaders(token: string, extra?: Record<string, string>): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    ...extra,
+  };
 }
 
 function parseLinkedIssueNumbers(body: string | null): number[] {
@@ -86,7 +64,14 @@ export class AppGitHubService implements IGitHubService {
 
     const prUrl = `${GITHUB_API}/repos/${repoFullName}/pulls/${prNumber}`;
 
-    const prRes = await ghFetch(prUrl, token);
+    const prRes = await githubFetch(
+      prUrl,
+      { headers: githubHeaders(token) },
+      {
+        label: `github.fetch-pr-context repo=${repoFullName} pr=${prNumber}`,
+        context: { repo: repoFullName, pr: prNumber, installationId },
+      },
+    );
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const pr: any = await prRes.json();
@@ -102,7 +87,14 @@ export class AppGitHubService implements IGitHubService {
 
     const issueResults = await Promise.allSettled(
       issueNumbers.map(async (n) => {
-        const res = await ghFetch(`${GITHUB_API}/repos/${repoFullName}/issues/${n}`, token);
+        const res = await githubFetch(
+          `${GITHUB_API}/repos/${repoFullName}/issues/${n}`,
+          { headers: githubHeaders(token) },
+          {
+            label: `github.fetch-linked-issue repo=${repoFullName} issue=${n}`,
+            context: { repo: repoFullName, pr: prNumber, issue: n, installationId },
+          },
+        );
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const issue: any = await res.json();
         return {
@@ -210,7 +202,14 @@ export class AppGitHubService implements IGitHubService {
     const results = await Promise.allSettled(
       uniquePaths.map(async (filePath) => {
         const url = `${GITHUB_API}/repos/${repoFullName}/contents/${encodeGitHubPath(filePath)}?ref=${encodeURIComponent(ref)}`;
-        const res = await ghFetch(url, token);
+        const res = await githubFetch(
+          url,
+          { headers: githubHeaders(token) },
+          {
+            label: `github.fetch-repository-file repo=${repoFullName} path=${filePath}`,
+            context: { repo: repoFullName, ref, filePath, installationId },
+          },
+        );
         const payload = await res.json() as {
           type?: string;
           encoding?: string;
@@ -267,35 +266,22 @@ export class AppGitHubService implements IGitHubService {
     logger.info("Posting comment on PR", { repo: repoFullName, pr: prNumber, installationId });
 
     const url = `${GITHUB_API}/repos/${repoFullName}/issues/${prNumber}/comments`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Content-Type": "application/json",
+    await githubFetch(
+      url,
+      {
+        method: "POST",
+        headers: githubHeaders(token, { "Content-Type": "application/json" }),
+        body: JSON.stringify({ body }),
       },
-      body: JSON.stringify({ body }),
-    });
-
-    if (!res.ok) {
-      let errBody: string;
-      try {
-        errBody = sanitizeErrorBody(await res.text());
-      } catch (readErr) {
-        errBody = "[body unreadable]";
-        logger.debug("Could not read error response body", {
-          error: readErr instanceof Error ? readErr.message : String(readErr),
-        });
-      }
-      logger.error("Failed to post comment", {
-        repo: repoFullName,
-        pr: prNumber,
-        status: res.status,
-        body: errBody,
-      });
-      throw new Error(`Failed to post comment: GitHub API ${res.status}: ${errBody}`);
-    }
+      {
+        label: `github.post-comment repo=${repoFullName} pr=${prNumber}`,
+        context: {
+          repo: repoFullName,
+          pr: prNumber,
+          installationId,
+        },
+      },
+    );
 
     logger.info("Comment posted successfully", { repo: repoFullName, pr: prNumber });
   }
@@ -318,28 +304,28 @@ export class AppGitHubService implements IGitHubService {
       );
     }
 
-    const res = await fetch(
+    const res = await githubFetch(
       `${GITHUB_API}/repos/${owner}/${repo}/pulls/${params.prNumber}/reviews`,
       {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${params.reviewerAccessToken}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
+        headers: githubHeaders(params.reviewerAccessToken, {
           "Content-Type": "application/json",
-        },
+        }),
         body: JSON.stringify({
           commit_id: params.commitId,
           body: params.summary ?? "Drafted from the review walkthrough.",
           comments: params.comments.map(({ path, body, position }) => ({ path, body, position })),
         }),
       },
+      {
+        label: `github.create-pending-review repo=${params.repoFullName} pr=${params.prNumber}`,
+        context: {
+          repo: params.repoFullName,
+          pr: params.prNumber,
+          commentCount: params.comments.length,
+        },
+      },
     );
-
-    if (!res.ok) {
-      const body = sanitizeErrorBody(await res.text());
-      throw new Error(`GitHub create pending review failed (${res.status}): ${body}`);
-    }
 
     const json = await res.json() as { id?: number };
     if (typeof json.id !== "number") {
@@ -356,27 +342,27 @@ export class AppGitHubService implements IGitHubService {
     params: SubmitPendingReviewParams,
   ): Promise<{ submittedReviewId: number }> {
     const { owner, repo } = splitRepoFullName(params.repoFullName);
-    const res = await fetch(
+    const res = await githubFetch(
       `${GITHUB_API}/repos/${owner}/${repo}/pulls/${params.prNumber}/reviews/${params.pendingReviewId}/events`,
       {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${params.reviewerAccessToken}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
+        headers: githubHeaders(params.reviewerAccessToken, {
           "Content-Type": "application/json",
-        },
+        }),
         body: JSON.stringify({
           event: "COMMENT",
           body: params.body ?? "Submitted from the review walkthrough.",
         }),
       },
+      {
+        label: `github.submit-pending-review repo=${params.repoFullName} pr=${params.prNumber}`,
+        context: {
+          repo: params.repoFullName,
+          pr: params.prNumber,
+          pendingReviewId: params.pendingReviewId,
+        },
+      },
     );
-
-    if (!res.ok) {
-      const body = sanitizeErrorBody(await res.text());
-      throw new Error(`GitHub submit pending review failed (${res.status}): ${body}`);
-    }
 
     const json = await res.json() as { id?: number };
     if (typeof json.id !== "number") {
@@ -404,22 +390,21 @@ export class AppGitHubService implements IGitHubService {
     reviewId: number,
     reviewerAccessToken: string,
   ): Promise<void> {
-    const res = await fetch(
+    await githubFetch(
       `${GITHUB_API}/repos/${owner}/${repo}/pulls/${prNumber}/reviews/${reviewId}`,
       {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${reviewerAccessToken}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
+        headers: githubHeaders(reviewerAccessToken),
+      },
+      {
+        label: `github.delete-pending-review repo=${owner}/${repo} pr=${prNumber}`,
+        context: {
+          repo: `${owner}/${repo}`,
+          pr: prNumber,
+          pendingReviewId: reviewId,
         },
       },
     );
-
-    if (!res.ok) {
-      const body = sanitizeErrorBody(await res.text());
-      throw new Error(`GitHub delete pending review failed (${res.status}): ${body}`);
-    }
   }
 
 }
