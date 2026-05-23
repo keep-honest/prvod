@@ -1,15 +1,14 @@
 import { createLogger } from "@/lib/logger";
-import { retryWithBackoff } from "@/lib/retry";
 import { DiffFetchTimeoutError, DiffParseError } from "@/lib/diff-errors";
 import type { IDiffSource } from "@/interfaces/IDiffSource";
 import type { DiffSegment } from "@/domain/entities/DiffSegment";
 import type { FileChunk } from "@/domain/entities/FileChunk";
 import type { FileChangeSummary, ChangeType } from "@/domain/entities/FileChangeSummary";
 import type { GitHubAppTokenService } from "./GitHubAppTokenService";
+import { GITHUB_API, githubFetch } from "./githubFetch";
 
 const logger = createLogger("GitHubFilesDiffSource");
 
-const GITHUB_API = "https://api.github.com";
 const PER_PAGE = 30;
 const OVERSIZE_PATCH_BYTES = 65_536; // 64 KB
 const OVERSIZE_CHANGES = 2_000;
@@ -79,11 +78,6 @@ function mapStatus(status: string): ChangeType {
     default:
       return "modified";
   }
-}
-
-/** Whether an HTTP status should trigger a retry. */
-function shouldRetryStatus(status: number): boolean {
-  return status === 429 || status >= 500;
 }
 
 /** One file entry from the GitHub PR Files API. */
@@ -202,50 +196,37 @@ export class GitHubFilesDiffSource implements IDiffSource {
         segmentIndex,
       });
 
-      let entries;
+      let entries: { data: GitHubFilesEntry[]; hasNext: boolean };
       try {
-        entries = await retryWithBackoff(
-          async () => {
-            const token = await this.tokenService.getToken(this.installationId);
-            const res = await fetch(url, {
-              headers: {
-                Authorization: `Bearer ${token}`,
-                Accept: "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-              },
-              signal,
-            });
-
-            if (!res.ok) {
-              const body = await res.text().catch(() => "[unreadable]");
-              const err = new Error(`GitHub API ${res.status}: ${body.slice(0, 200)}`);
-              (err as { status?: number }).status = res.status;
-              throw err;
-            }
-
-            const data = (await res.json()) as GitHubFilesEntry[];
-
-            // Termination: empty page or no next-page Link header
-            const linkHeader = res.headers.get("Link") ?? "";
-            const hasNext = linkHeader.includes(`rel="next"`);
-
-            return { data, hasNext };
-          },
+        const token = await this.tokenService.getToken(this.installationId);
+        const res = await githubFetch(
+          url,
           {
-            label: `github-pr-files page=${page}`,
-            maxAttempts: 3,
-            baseMs: 500,
-            capMs: 8_000,
-            shouldRetry: (err: unknown) => {
-              if (err instanceof Error) {
-                const status = (err as { status?: number }).status;
-                if (status !== undefined) return shouldRetryStatus(status);
-              }
-              return true;
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
             },
             signal,
           },
+          {
+            label: `github-pr-files page=${page}`,
+            context: {
+              repo: this.repoFullName,
+              pr: this.prNumber,
+              page,
+              segmentIndex,
+            },
+          },
         );
+
+        const data = (await res.json()) as GitHubFilesEntry[];
+
+        // Termination: empty page or no next-page Link header
+        const linkHeader = res.headers.get("Link") ?? "";
+        const hasNext = linkHeader.includes(`rel="next"`);
+
+        entries = { data, hasNext };
       } catch (err) {
         if (signal.aborted) throw err;
         throw new DiffFetchTimeoutError("fetch", {
@@ -335,46 +316,33 @@ export class GitHubFilesDiffSource implements IDiffSource {
 
       const url = `${GITHUB_API}/repos/${this.repoFullName}/pulls/${this.prNumber}/files?per_page=${PER_PAGE}&page=${page}`;
 
-      let result;
+      let result: { data: GitHubFilesEntry[]; hasNext: boolean };
       try {
-        result = await retryWithBackoff(
-          async () => {
-            const token = await this.tokenService.getToken(this.installationId);
-            const res = await fetch(url, {
-              headers: {
-                Authorization: `Bearer ${token}`,
-                Accept: "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-              },
-              signal,
-            });
-
-            if (!res.ok) {
-              const body = await res.text().catch(() => "[unreadable]");
-              const err = new Error(`GitHub API ${res.status}: ${body.slice(0, 200)}`);
-              (err as { status?: number }).status = res.status;
-              throw err;
-            }
-
-            const data = (await res.json()) as GitHubFilesEntry[];
-            const linkHeader = res.headers.get("Link") ?? "";
-            return { data, hasNext: linkHeader.includes(`rel="next"`) };
-          },
+        const token = await this.tokenService.getToken(this.installationId);
+        const res = await githubFetch(
+          url,
           {
-            label: `github-pr-file-chunk page=${page} file=${filePath}`,
-            maxAttempts: 3,
-            baseMs: 500,
-            capMs: 8_000,
-            shouldRetry: (err: unknown) => {
-              if (err instanceof Error) {
-                const status = (err as { status?: number }).status;
-                if (status !== undefined) return shouldRetryStatus(status);
-              }
-              return true;
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
             },
             signal,
           },
+          {
+            label: `github-pr-file-chunk page=${page} file=${filePath}`,
+            context: {
+              repo: this.repoFullName,
+              pr: this.prNumber,
+              filePath,
+              page,
+            },
+          },
         );
+
+        const data = (await res.json()) as GitHubFilesEntry[];
+        const linkHeader = res.headers.get("Link") ?? "";
+        result = { data, hasNext: linkHeader.includes(`rel="next"`) };
       } catch (err) {
         if (signal.aborted) throw err;
         throw new DiffFetchTimeoutError("fetch", {
