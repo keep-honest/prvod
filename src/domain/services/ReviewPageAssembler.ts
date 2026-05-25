@@ -9,6 +9,7 @@ import type {
 } from "@/domain/entities/ReviewPage";
 import type { IStorageService } from "@/interfaces/IStorageService";
 import { buildReviewGraphData } from "@/infrastructure/video/graph/buildReviewGraphData";
+import { normalizeStoredVideoUrl } from "@/lib/storage/normalizeStoredVideoUrl";
 
 const SIGNED_URL_TTL_SECONDS = 4 * 3600; // 4 hours
 
@@ -55,9 +56,12 @@ export class ReviewPageAssembler {
     }
 
     const visibility: ReviewVisibility = job.repoIsPrivate ? "private" : "public";
+    // Prefer re-signing from objectKey so legacy `file://` rows heal at
+    // read time. Only fall back to the stored value when objectKey is
+    // missing — and even then strip unplayable `file://` URLs.
     const videoUrl = job.objectKey
       ? await this.storageService.getSignedUrl(job.objectKey, SIGNED_URL_TTL_SECONDS)
-      : job.videoUrl;
+      : normalizeStoredVideoUrl(job.videoUrl);
 
     if (!videoUrl) {
       throw new Error("Failed to resolve video URL for review page");

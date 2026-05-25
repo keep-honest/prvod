@@ -374,6 +374,7 @@ See [`docs/operations/google-tts-timeouts.md`](docs/operations/google-tts-timeou
 | `STORAGE_PROVIDER` | No | `r2` | `r2` \| `s3` \| `local` |
 | `USE_LOCAL_STORAGE` | Deprecated | `false` | Backward-compatible shorthand for `STORAGE_PROVIDER=local` |
 | `LOCAL_STORAGE_DIR` | No | `.local-storage` | Override local storage path |
+| `STORAGE_URL_SECRET` | When `local` | — | HMAC secret for signing local-storage URLs served by `/api/local-storage/*`. Required at boot when `STORAGE_PROVIDER=local` (or `USE_LOCAL_STORAGE=true`); the process refuses to start without it. Generate with `openssl rand -hex 32`. Rotating the value immediately invalidates every outstanding video link. |
 | `R2_ACCOUNT_ID` | When `r2` | — | Cloudflare account ID |
 | `R2_ACCESS_KEY_ID` | When `r2` | — | R2 access key |
 | `R2_SECRET_ACCESS_KEY` | When `r2` | — | R2 secret key |
@@ -713,6 +714,8 @@ For implementation details, see [FOR_DEVELOPER.md](FOR_DEVELOPER.md) and `specs/
 **Checkpoints are local filesystem.** In multi-instance deployments, retry requests must hit the same instance that wrote the checkpoint. Replace `LocalCheckpointStore` with a database-backed implementation for horizontal scaling.
 
 **Signed URLs expire.** Default 4 hours. `GET /api/jobs/:id` always regenerates a fresh URL, but links shared directly with users will stop working after expiry.
+
+**Local storage requires `STORAGE_URL_SECRET`.** When `STORAGE_PROVIDER=local` (or `USE_LOCAL_STORAGE=true`), videos are served by the `/api/local-storage/[...key]` route with HMAC-SHA256 signed URLs that mirror the S3 adapter's presigned URL semantics (`?exp=<unix>&sig=<hex>`, expiry from `SIGNED_URL_EXPIRY_HOURS`, tampering invalidates the signature, secret rotation kills every outstanding link). The container refuses to boot without `STORAGE_URL_SECRET` set — generate one with `openssl rand -hex 32` and add it to your `.env.local`. The route is gated off entirely in non-local deployments so it cannot leak in prod.
 
 ---
 

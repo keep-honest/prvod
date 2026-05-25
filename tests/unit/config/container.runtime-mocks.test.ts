@@ -86,6 +86,7 @@ describe("container selective runtime mocks", () => {
     vi.stubEnv("SCRIPT_WRITER", "mock");
     vi.stubEnv("TTS_PROVIDER", "mock");
     vi.stubEnv("STORAGE_PROVIDER", "local");
+    vi.stubEnv("STORAGE_URL_SECRET", "test-secret-".padEnd(64, "x"));
     vi.stubEnv("BILLING_PROVIDER", "dev");
 
     const { getContainer, resetContainer } = await import("@/config/container");
@@ -110,6 +111,7 @@ describe("container selective runtime mocks", () => {
     vi.stubEnv("TTS_PROVIDER", "mock");
     vi.stubEnv("USE_BUILTIN_TTS", "true");
     vi.stubEnv("STORAGE_PROVIDER", "local");
+    vi.stubEnv("STORAGE_URL_SECRET", "test-secret-".padEnd(64, "x"));
     vi.stubEnv("BILLING_PROVIDER", "dev");
 
     const { getContainer, resetContainer } = await import("@/config/container");
@@ -148,6 +150,7 @@ describe("container selective runtime mocks", () => {
     vi.stubEnv("GEMINI_API_KEY", "test-key");
     vi.stubEnv("TTS_PROVIDER", "mock");
     vi.stubEnv("STORAGE_PROVIDER", "local");
+    vi.stubEnv("STORAGE_URL_SECRET", "test-secret-".padEnd(64, "x"));
     vi.stubEnv("BILLING_PROVIDER", "dev");
 
     const { getContainer, resetContainer } = await import("@/config/container");
@@ -162,6 +165,25 @@ describe("container selective runtime mocks", () => {
     resetContainer();
   }, 15_000);
 
+  it("fails boot when STORAGE_PROVIDER=local and STORAGE_URL_SECRET is unset", async () => {
+    stubProductionContainerDependencies();
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("DATABASE_URL", "postgresql://example:test@localhost:5432/prvod");
+    vi.stubEnv("USE_MOCK_SERVICES", "false");
+    vi.stubEnv("API_SECRET_KEY", "");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    vi.stubEnv("GITHUB_APP_PRIVATE_KEY", "");
+    vi.stubEnv("SCRIPT_WRITER", "mock");
+    vi.stubEnv("TTS_PROVIDER", "mock");
+    vi.stubEnv("STORAGE_PROVIDER", "local");
+    vi.stubEnv("BILLING_PROVIDER", "dev");
+    // STORAGE_URL_SECRET intentionally NOT set
+    vi.stubEnv("STORAGE_URL_SECRET", "");
+
+    const { getContainer } = await import("@/config/container");
+    await expect(getContainer()).rejects.toThrow(/openssl rand -hex 32/);
+  });
+
   it("rejects an unknown SCRIPT_WRITER value", async () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("DATABASE_URL", "postgresql://example:test@localhost:5432/prvod");
@@ -169,6 +191,7 @@ describe("container selective runtime mocks", () => {
     vi.stubEnv("SCRIPT_WRITER", "not-a-real-writer");
     vi.stubEnv("TTS_PROVIDER", "mock");
     vi.stubEnv("STORAGE_PROVIDER", "local");
+    vi.stubEnv("STORAGE_URL_SECRET", "test-secret-".padEnd(64, "x"));
     vi.stubEnv("BILLING_PROVIDER", "dev");
 
     const { getContainer } = await import("@/config/container");

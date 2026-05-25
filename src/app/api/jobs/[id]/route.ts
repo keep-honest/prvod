@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createLogger } from "@/lib/logger";
 import { isValidUuid } from "@/lib/validation";
 import { withJobsReadAuth } from "@/lib/apiMiddleware";
+import { resolveVideoUrlForJobsApi } from "@/lib/storage/resolveVideoUrlForJobsApi";
 
 const DEFAULT_SIGNED_URL_EXPIRY_HOURS = 4;
 
@@ -132,21 +133,26 @@ export const GET = withJobsReadAuth(async (
     );
   }
 
-  // Refresh signed URL if job is completed and has an objectKey
-  let videoUrl = job.videoUrl;
   const expirySeconds = resolveSignedUrlExpirySeconds();
-  if (job.status === "completed" && job.objectKey) {
-    try {
-      videoUrl = await container.storageService.getSignedUrl(
-        job.objectKey,
-        expirySeconds,
-      );
-    } catch (error) {
-      logger.warn("Failed to refresh signed URL, using stored URL", {
-        error: error instanceof Error ? error.message : "Unknown",
-      });
-    }
+  const urlResolution = await resolveVideoUrlForJobsApi({
+    storageService: container.storageService,
+    jobStatus: job.status,
+    objectKey: job.objectKey,
+    storedVideoUrl: job.videoUrl,
+    expirySeconds,
+    jobId,
+    logger,
+  });
+  if (urlResolution.kind === "signing-unavailable") {
+    return NextResponse.json(
+      {
+        error: "SIGNING_UNAVAILABLE",
+        message: "Video URL temporarily unavailable",
+      },
+      { status: 503 },
+    );
   }
+  const videoUrl = urlResolution.videoUrl;
   const ttsAudioJson =
     job.status === "completed"
       ? await refreshTtsAudioJson(
