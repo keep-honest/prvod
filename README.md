@@ -2,11 +2,23 @@
 
 **Turn any GitHub pull request into a narrated video summary.**
 
-> **Prefer not to run the infra?** Get a hosted version at [prvod.dev](https://prvod.dev). The free tier comes with 10 credits a month; paid plans add private repos, team controls, and features that build on the open-source core. [Sign up free →](https://prvod.dev)
+> **Prefer not to run the infra?** Get a hosted version at [prvod.dev](https://prvod.dev). The free tier comes with 10 credits a month; paid plans add private repos, team controls, and features that build on the open-source core. [Subsrcibe →](https://prvod.dev)
 
 Feed it a PR — diff, title, linked issues — and get back a 20–120 second MP4 with AI-generated visuals, syntax-highlighted code overlays, word-by-word captions, and spoken narration of what changed and why. Standard mode scales duration by PR size (20–120s); short mode (`@prvod short`) produces a focused 20–60 second summary; popcorn mode (`@prvod popcorn`) generates an extended ~5-minute mini documentary (240–320s) that covers every changed file in depth. Reviewer-style narration is opt-in through deepdive mode (`@prvod deepdive`, `@prvod <mode> deepdive`, or CLI/API deepdive flags).
 
 The supported production trigger is the GitHub App webhook: users add `@prvod` to a PR description or comment, the server generates the video, and the app posts the result back as a bot comment. Completed jobs render a minimal video review page (`/reviews/[jobId]`) and a public share player (`/watch/[jobId]`).
+
+<video src="https://pub-50a4fe3c292447b5957b0a6af6fb2262.r2.dev/repo/videos/prvod_demo.MP4"
+       poster=".github/assets/prvod-demo-poster.png"
+       controls
+       playsinline
+       width="100%">
+  <a href="https://pub-50a4fe3c292447b5957b0a6af6fb2262.r2.dev/repo/videos/prvod_demo.MP4">
+    <img src=".github/assets/prvod-demo-poster.png" alt="PRVOD demo — a real PR turned into a narrated video summary" />
+  </a>
+</video>
+
+_A real PR turned into a narrated video summary, end to end._
 
 ## Table of Contents
 
