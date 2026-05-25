@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { GoogleGenAI } from "@google/genai";
-import type { ZodTypeAny, infer as ZodInfer } from "zod";
+import { ZodError, type ZodTypeAny, type infer as ZodInfer } from "zod";
+import { StructuredOutputValidationError } from "@/infrastructure/llm/promptPipelineV2Repair";
 import { createLogger } from "@/lib/logger";
 import {
   DEFAULT_MODE_MAX_DURATION,
@@ -340,14 +341,41 @@ export class GeminiSdkScriptWriter implements IScriptWriter {
               { label: `genai.sdk.completeJson:${schemaName}` },
             );
             const text = extractGenAiResponseText(response, { label: `completeJson:${schemaName}`, budget });
+            // Separate JSON syntax errors from Zod validation errors. Zod failures
+            // throw `StructuredOutputValidationError` carrying rawJson so callers can
+            // hand the failure to repairLoop for retry-with-feedback. Syntax errors
+            // surface as ordinary Error (repair-loop's SyntaxError path catches them).
+            let parsed: unknown;
             try {
-              return schema.parse(JSON.parse(text));
+              parsed = JSON.parse(text);
             } catch (err) {
-              logger.error("GenAI structured output parse/validate failed", {
+              logger.error("GenAI structured output JSON parse failed", {
                 schemaName,
                 rawTextPreview: text.slice(0, 500),
                 error: err instanceof Error ? err.message : String(err),
               });
+              throw new Error(
+                `GenAI structured output for "${schemaName}" failed: ${err instanceof Error ? err.message : String(err)}`,
+                { cause: err },
+              );
+            }
+            try {
+              return schema.parse(parsed);
+            } catch (err) {
+              logger.error("GenAI structured output schema validation failed", {
+                schemaName,
+                rawTextPreview: text.slice(0, 500),
+                error: err instanceof Error ? err.message : String(err),
+              });
+              if (err instanceof ZodError) {
+                throw new StructuredOutputValidationError(
+                  `GenAI structured output for "${schemaName}" failed: ${err.message}`,
+                  text,
+                  err,
+                  schemaName,
+                  { cause: err },
+                );
+              }
               throw new Error(
                 `GenAI structured output for "${schemaName}" failed: ${err instanceof Error ? err.message : String(err)}`,
               );

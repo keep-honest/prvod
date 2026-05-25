@@ -343,6 +343,12 @@ async function createProductionContainer(): Promise<Container> {
   let storageService: IStorageService;
   switch (storageProvider) {
     case "local": {
+      // Fail loudly at boot if the HMAC secret is missing, rather than
+      // per-request when an asset URL is first minted. The signed-URL
+      // contract is the only thing standing between leaked URLs and
+      // indefinite access — refuse to start without it.
+      const { readStorageUrlSecret } = await import("@/lib/storage/signLocalUrl");
+      readStorageUrlSecret();
       const { LocalStorageService } = await import("@/infrastructure/storage/LocalStorageService");
       storageService = new LocalStorageService();
       break;

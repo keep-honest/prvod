@@ -35,7 +35,14 @@ ARG VIDEO_COMPOSITOR=ffmpeg
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && \
+# Only the postinstall script is needed at this stage — copying scripts/ in
+# full would bust this layer's cache on any unrelated script change.
+COPY scripts/ensure-remotion-browser.mjs ./scripts/ensure-remotion-browser.mjs
+# Re-export the ARG into the npm subprocess so the package.json `postinstall`
+# hook can read VIDEO_COMPOSITOR and pre-fetch chrome-headless-shell. ARG is
+# visible to shell expansion in RUN but is NOT inherited by spawned processes
+# unless explicitly assigned on the command line.
+RUN VIDEO_COMPOSITOR=$VIDEO_COMPOSITOR npm ci --omit=dev && \
     if [ "$VIDEO_COMPOSITOR" != "remotion" ]; then \
       rm -rf node_modules/@remotion node_modules/remotion; \
     fi
@@ -61,6 +68,11 @@ RUN set -e && \
 FROM node:26-bookworm-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
+# The postinstall hook in package.json references scripts/ensure-remotion-browser.mjs.
+# `npm ci` invokes that hook unconditionally — Node must be able to load the file even
+# though the script's own gate (VIDEO_COMPOSITOR !== "remotion") will exit it as a no-op
+# in this stage. Without this targeted copy, the builder fails with "Cannot find module".
+COPY scripts/ensure-remotion-browser.mjs ./scripts/ensure-remotion-browser.mjs
 RUN npm ci
 COPY . .
 RUN npm run build

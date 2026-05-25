@@ -3,7 +3,7 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { jsonrepair } from "jsonrepair";
-import type { ZodTypeAny, infer as ZodInfer } from "zod";
+import { ZodError, type ZodTypeAny, type infer as ZodInfer } from "zod";
 import type { ILLMClient } from "@/interfaces/ILLMClient";
 import { createLogger } from "@/lib/logger";
 import {
@@ -23,7 +23,7 @@ import {
   warnOnScriptDefaults,
 } from "@/infrastructure/llm/script-prompt";
 import { attachPromptPipelineRolloutComparison } from "@/infrastructure/llm/promptPipelineV2Comparison";
-import { stripMarkdownFences } from "@/infrastructure/llm/promptPipelineV2Repair";
+import { stripMarkdownFences, StructuredOutputValidationError } from "@/infrastructure/llm/promptPipelineV2Repair";
 import { generateScriptWithPromptPipelineV2 } from "@/infrastructure/llm/promptPipelineV2Runner";
 import { ensureLastSceneOverview } from "@/domain/entities/VideoScript";
 import { enforceReviewerNarration } from "@/infrastructure/llm/promptPipelineV2Validators";
@@ -687,6 +687,18 @@ export class BaseCliScriptWriter implements IScriptWriter {
                       data: JSON.stringify(envelope.data).slice(0, 500),
                       error: err instanceof Error ? err.message : String(err),
                     });
+                    if (err instanceof ZodError) {
+                      // Surface rawJson + ZodError so the caller (promptPipelineV2Runner)
+                      // can hand the failure to repairLoop for a text-mode retry-with-feedback
+                      // pass instead of bringing the whole pipeline down on one bad cluster.
+                      throw new StructuredOutputValidationError(
+                        `CLI structured output for "${schemaName}" failed: ${err.message}`,
+                        JSON.stringify(envelope.data, null, 2),
+                        err,
+                        schemaName,
+                        { cause: err },
+                      );
+                    }
                     throw new Error(`CLI structured output for "${schemaName}" failed: ${err instanceof Error ? err.message : String(err)}`);
                   }
                 }
@@ -699,15 +711,43 @@ export class BaseCliScriptWriter implements IScriptWriter {
 
               // Generic path (Gemini CLI, Codex CLI, or Claude CLI without envelope)
               const cleaned = repairCliJson(stdout);
+              // Split JSON syntax errors from Zod validation errors. Syntax errors stay
+              // as ordinary `Error` — repair-loop handles them via its own SyntaxError
+              // path. Zod errors throw `StructuredOutputValidationError` carrying the
+              // parsed-but-invalid payload so callers can hand it to repairLoop.
+              let parsed: unknown;
               try {
-                return schema.parse(JSON.parse(cleaned));
+                parsed = JSON.parse(cleaned);
               } catch (err) {
-                this.logger.error("CLI structured output parse/validate failed", {
+                this.logger.error("CLI structured output JSON parse failed", {
                   schemaName,
                   command: this.config.command,
                   rawPreview: stdout.slice(0, 500),
                   error: err instanceof Error ? err.message : String(err),
                 });
+                throw new Error(
+                  `CLI structured output for "${schemaName}" failed: ${err instanceof Error ? err.message : String(err)}`,
+                  { cause: err },
+                );
+              }
+              try {
+                return schema.parse(parsed);
+              } catch (err) {
+                this.logger.error("CLI structured output schema validation failed", {
+                  schemaName,
+                  command: this.config.command,
+                  rawPreview: stdout.slice(0, 500),
+                  error: err instanceof Error ? err.message : String(err),
+                });
+                if (err instanceof ZodError) {
+                  throw new StructuredOutputValidationError(
+                    `CLI structured output for "${schemaName}" failed: ${err.message}`,
+                    cleaned,
+                    err,
+                    schemaName,
+                    { cause: err },
+                  );
+                }
                 throw new Error(`CLI structured output for "${schemaName}" failed: ${err instanceof Error ? err.message : String(err)}`);
               }
             } finally {

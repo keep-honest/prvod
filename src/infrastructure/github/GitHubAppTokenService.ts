@@ -1,9 +1,9 @@
 import { createPrivateKey, createSign } from "crypto";
 import { createLogger } from "@/lib/logger";
+import { GITHUB_API, githubFetch } from "@/infrastructure/github/githubFetch";
 
 const logger = createLogger("GitHubAppTokenService");
 
-const GITHUB_API = "https://api.github.com";
 // Evict token 5 min before GitHub's 1-hour expiry to avoid stale-token errors
 const TOKEN_BUFFER_MS = 5 * 60 * 1000;
 
@@ -94,22 +94,29 @@ export class GitHubAppTokenService {
     const jwt = buildAppJwt(this.appId, this.privateKeyPem);
 
     const url = `${GITHUB_API}/app/installations/${installationId}/access_tokens`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-
-    if (!res.ok) {
-      let body = "";
-      try {
-        body = (await res.text()).slice(0, 500);
-      } catch { /* ignore */ }
+    let res: Response;
+    try {
+      res = await githubFetch(
+        url,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${jwt}`,
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+        },
+        {
+          label: `github.installation-token installationId=${installationId}`,
+          context: { installationId },
+        },
+      );
+    } catch (err) {
       throw new Error(
-        `Failed to get installation token for installationId=${installationId}: ${res.status} ${body}`,
+        `Failed to get installation token for installationId=${installationId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        { cause: err },
       );
     }
 

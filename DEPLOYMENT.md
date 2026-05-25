@@ -266,10 +266,15 @@ claude login
 ### Build and run
 
 ```bash
-npm ci
+# Pre-fetch Chrome Headless Shell at install time when using Remotion.
+# VIDEO_COMPOSITOR must be exported in the shell for the postinstall hook to
+# see it — a value placed only in .env is loaded at runtime by Next.js, not by npm.
+VIDEO_COMPOSITOR=remotion npm ci   # or just `npm ci` for the default ffmpeg compositor
 npm run build
 npm run start
 ```
+
+If `VIDEO_COMPOSITOR=remotion` is set only via `.env`, the postinstall pre-fetch is skipped and the boot-time `instrumentation.ts` hook will download Chrome Headless Shell (~110 MB) on the first `npm run start` instead. The download still happens before any video is rendered — it just shifts from install-time to first-boot-time.
 
 The server starts on port 3000 (configure via `PORT` env var, standard Next.js).
 

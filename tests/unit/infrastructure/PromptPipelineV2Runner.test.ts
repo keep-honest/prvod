@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { ZodError } from "zod";
 import { generateScriptWithPromptPipelineV2, recomputeCodeFirstDurations, deriveScriptFromTransport, normalizeBatchedScenesFromOutline, ensureLastSceneOverview } from "@/infrastructure/llm/promptPipelineV2Runner";
-import { promptPipelineV2ArtifactsSchema } from "@/domain/entities/PromptPipelineV2";
+import { promptPipelineV2ArtifactsSchema, coveragePlanSchema, sceneOutlineSchema } from "@/domain/entities/PromptPipelineV2";
+import { StructuredOutputValidationError } from "@/infrastructure/llm/promptPipelineV2Repair";
 import {
   VALID_SCRIPT,
   fakeDiffAnalysis,
@@ -301,6 +303,163 @@ describe("generateScriptWithPromptPipelineV2", () => {
         validDurations: [4, 6, 8],
       }),
     ).rejects.toThrow(/majorClusterIds/i);
+  });
+
+  it("repairs a Zod-invalid coverage_plan via completeText (regression for the original bug)", async () => {
+    // The exact failure mode from the production trace: clusters[6] emitted
+    // with an empty validationEvidence array, failing z.array().min(1). The
+    // pipeline used to die at stage 1/7; now completeJsonWithRepair catches
+    // the typed StructuredOutputValidationError, runs repairLoop against
+    // the original ZodError, and the LLM returns a fixed coverage plan.
+    vi.stubEnv("SCRIPT_REPAIR_MAX_ATTEMPTS", "2");
+    const validPlan = makeCoveragePlan();
+    const brokenPlan = {
+      ...validPlan,
+      clusters: validPlan.clusters.map((c, i) =>
+        i === 0 ? { ...c, validationEvidence: [] } : c,
+      ),
+    };
+    const zodError = (coveragePlanSchema.safeParse(brokenPlan) as { success: false; error: ZodError }).error;
+    const completeText = vi.fn().mockResolvedValueOnce(JSON.stringify(validPlan));
+    const completeJson = vi.fn()
+      .mockRejectedValueOnce(
+        new StructuredOutputValidationError(
+          'CLI structured output for "coverage_plan" failed: ...',
+          JSON.stringify(brokenPlan, null, 2),
+          zodError,
+          "coverage_plan",
+        ),
+      )
+      .mockResolvedValueOnce(passingCoverageJudge())
+      .mockResolvedValueOnce(buildValidOutline())
+      .mockResolvedValueOnce(VALID_SCRIPT)
+      .mockResolvedValueOnce(passingNarrationJudge());
+
+    const result = await generateScriptWithPromptPipelineV2({
+      model: {
+        family: "claude",
+        supportsNativeStructuredOutput: true,
+        completeJson,
+        completeText,
+      },
+      context: fakePRContext,
+      analysis: fakeDiffAnalysis,
+      validDurations: [4, 6, 8],
+    });
+
+    expect(result.script.summary).toBe(VALID_SCRIPT.summary);
+    expect(completeText).toHaveBeenCalledTimes(1);
+    // The repair attempt must be invoked with the coverage-plan shape hint,
+    // not the default video-script shape hint.
+    const [, repairUserPrompt] = completeText.mock.calls[0];
+    expect(repairUserPrompt).toContain("validationEvidence");
+    vi.unstubAllEnvs();
+  });
+
+  it("propagates final ZodError as StructuredOutputValidationError when coverage_plan repair exhausts", async () => {
+    vi.stubEnv("SCRIPT_REPAIR_MAX_ATTEMPTS", "2");
+    const validPlan = makeCoveragePlan();
+    const brokenPlan = {
+      ...validPlan,
+      clusters: validPlan.clusters.map((c) => ({ ...c, validationEvidence: [] })),
+    };
+    const zodError = (coveragePlanSchema.safeParse(brokenPlan) as { success: false; error: ZodError }).error;
+    const completeText = vi.fn().mockResolvedValue(JSON.stringify(brokenPlan)); // repair always returns invalid
+    const completeJson = vi.fn().mockRejectedValueOnce(
+      new StructuredOutputValidationError(
+        'CLI structured output for "coverage_plan" failed: ...',
+        JSON.stringify(brokenPlan, null, 2),
+        zodError,
+        "coverage_plan",
+      ),
+    );
+
+    await expect(
+      generateScriptWithPromptPipelineV2({
+        model: {
+          family: "claude",
+          supportsNativeStructuredOutput: true,
+          completeJson,
+          completeText,
+        },
+        context: fakePRContext,
+        analysis: fakeDiffAnalysis,
+        validDurations: [4, 6, 8],
+      }),
+    ).rejects.toMatchObject({
+      name: "StructuredOutputValidationError",
+      schemaName: "coverage_plan",
+    });
+    vi.unstubAllEnvs();
+  });
+
+  it("rethrows the original StructuredOutputValidationError on coverage_plan when completeText is absent", async () => {
+    vi.stubEnv("SCRIPT_REPAIR_MAX_ATTEMPTS", "2");
+    const validPlan = makeCoveragePlan();
+    const brokenPlan = {
+      ...validPlan,
+      clusters: validPlan.clusters.map((c) => ({ ...c, validationEvidence: [] })),
+    };
+    const zodError = (coveragePlanSchema.safeParse(brokenPlan) as { success: false; error: ZodError }).error;
+    const originalError = new StructuredOutputValidationError(
+      'CLI structured output for "coverage_plan" failed: ...',
+      JSON.stringify(brokenPlan, null, 2),
+      zodError,
+      "coverage_plan",
+    );
+    const completeJson = vi.fn().mockRejectedValueOnce(originalError);
+
+    await expect(
+      generateScriptWithPromptPipelineV2({
+        model: {
+          family: "claude",
+          supportsNativeStructuredOutput: true,
+          completeJson,
+          // completeText intentionally omitted
+        },
+        context: fakePRContext,
+        analysis: fakeDiffAnalysis,
+        validDurations: [4, 6, 8],
+      }),
+    ).rejects.toBe(originalError);
+    vi.unstubAllEnvs();
+  });
+
+  it("repairs a Zod-invalid scene_outline via completeText before business validation", async () => {
+    vi.stubEnv("SCRIPT_REPAIR_MAX_ATTEMPTS", "2");
+    const validOutline = buildValidOutline();
+    const brokenOutline = { scenes: [] }; // fails sceneOutlineSchema (.min(1))
+    const zodError = (sceneOutlineSchema.safeParse(brokenOutline) as { success: false; error: ZodError }).error;
+    const completeText = vi.fn().mockResolvedValueOnce(JSON.stringify(validOutline));
+    const completeJson = vi.fn()
+      .mockResolvedValueOnce(makeCoveragePlan())
+      .mockResolvedValueOnce(passingCoverageJudge())
+      .mockRejectedValueOnce(
+        new StructuredOutputValidationError(
+          'CLI structured output for "scene_outline" failed: ...',
+          JSON.stringify(brokenOutline, null, 2),
+          zodError,
+          "scene_outline",
+        ),
+      )
+      .mockResolvedValueOnce(VALID_SCRIPT)
+      .mockResolvedValueOnce(passingNarrationJudge());
+
+    const result = await generateScriptWithPromptPipelineV2({
+      model: {
+        family: "claude",
+        supportsNativeStructuredOutput: true,
+        completeJson,
+        completeText,
+      },
+      context: fakePRContext,
+      analysis: fakeDiffAnalysis,
+      validDurations: [4, 6, 8],
+    });
+
+    expect(result.script.summary).toBe(VALID_SCRIPT.summary);
+    expect(completeText).toHaveBeenCalledTimes(1);
+    vi.unstubAllEnvs();
   });
 
   it("keeps the first final-script pass on completeJson when native structured output exists", async () => {
@@ -800,6 +959,57 @@ describe("generateScriptWithPromptPipelineV2", () => {
           validDurations: [4, 6, 8],
         }),
       ).rejects.toThrow();
+    });
+
+    it("batched pass: repairs a Zod-invalid batch_envelope via completeText", async () => {
+      // First batch (envelope) throws StructuredOutputValidationError → wrapper
+      // catches it, repairLoop fires, returns a valid envelope. Subsequent
+      // batches resolve normally. The batched pipeline must NOT crash on a
+      // single bad batch envelope.
+      vi.stubEnv("BATCH_SCENE_GENERATION", "true");
+      vi.stubEnv("SKIP_JUDGE", "true");
+      vi.stubEnv("SCRIPT_REPAIR_MAX_ATTEMPTS", "2");
+
+      const validEnvelope = {
+        ...VALID_SCRIPT,
+        scenes: VALID_SCRIPT.scenes.filter((s) => s.sceneNumber === 1),
+      };
+      const brokenEnvelope = { ...validEnvelope, scenes: [] }; // fails .min(1) on scenes
+      const envelopeZodError = new ZodError([
+        { code: "too_small", minimum: 1, type: "array", inclusive: true, message: "Array must contain at least 1 element(s)", path: ["scenes"] },
+      ] as never);
+
+      const completeJson = vi.fn()
+        .mockResolvedValueOnce(coveragePlan)
+        .mockResolvedValueOnce(outline)
+        // Batch 0 (envelope): throws typed error, repair via completeText.
+        .mockRejectedValueOnce(
+          new StructuredOutputValidationError(
+            'CLI structured output for "batch_envelope" failed: ...',
+            JSON.stringify(brokenEnvelope, null, 2),
+            envelopeZodError,
+            "batch_envelope",
+          ),
+        )
+        // Remaining batches: scene groups.
+        .mockResolvedValueOnce({ scenes: VALID_SCRIPT.scenes.filter((s) => s.sceneNumber >= 2 && s.sceneNumber <= 4) })
+        .mockResolvedValueOnce({ scenes: VALID_SCRIPT.scenes.filter((s) => s.sceneNumber >= 5 && s.sceneNumber <= 7) })
+        .mockResolvedValueOnce({ scenes: VALID_SCRIPT.scenes.filter((s) => s.sceneNumber === 8) });
+
+      const completeText = vi.fn()
+        // Repair for batch 0 envelope.
+        .mockResolvedValueOnce(JSON.stringify(validEnvelope));
+
+      const result = await generateScriptWithPromptPipelineV2({
+        model: { family: "claude", supportsNativeStructuredOutput: true, completeJson, completeText },
+        context: fakePRContext,
+        analysis: fakeDiffAnalysis,
+        validDurations: [4, 6, 8],
+      });
+
+      expect(result.script.scenes.length).toBeGreaterThanOrEqual(8);
+      expect(completeText).toHaveBeenCalledTimes(1);
+      vi.unstubAllEnvs();
     });
 
     it("batched code-first pass repairs assembled duration overflow before failing the pipeline", async () => {
