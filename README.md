@@ -8,17 +8,9 @@ Feed it a PR — diff, title, linked issues — and get back a 20–120 second M
 
 The supported production trigger is the GitHub App webhook: users add `@prvod` to a PR description or comment, the server generates the video, and the app posts the result back as a bot comment. Completed jobs render a minimal video review page (`/reviews/[jobId]`) and a public share player (`/watch/[jobId]`).
 
-<video src="https://pub-50a4fe3c292447b5957b0a6af6fb2262.r2.dev/repo/videos/prvod_demo.MP4"
-       poster=".github/assets/prvod-demo-poster.png"
-       controls
-       playsinline
-       width="100%">
-  <a href="https://pub-50a4fe3c292447b5957b0a6af6fb2262.r2.dev/repo/videos/prvod_demo.MP4">
-    <img src=".github/assets/prvod-demo-poster.png" alt="PRVOD demo — a real PR turned into a narrated video summary" />
-  </a>
-</video>
+[![PRVOD demo — a real PR turned into a narrated video summary](.github/assets/prvod-demo-poster.png)](https://pub-50a4fe3c292447b5957b0a6af6fb2262.r2.dev/repo/videos/prvod_demo.MP4)
 
-_A real PR turned into a narrated video summary, end to end._
+_Click to play — a real PR turned into a narrated walkthrough video, end to end._
 
 ## Table of Contents
 
