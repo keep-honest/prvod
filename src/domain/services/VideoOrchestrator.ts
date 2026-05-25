@@ -27,6 +27,7 @@ import {
   resolveSceneTimeline,
 } from "@/infrastructure/video/remotion/timing";
 import { sanitizeSpokenNarrationText } from "@/lib/narrationText";
+import { resolveAudioSrc } from "@/lib/storage/resolveAudioSrc";
 
 const FPS = 30;
 const DEFAULT_SIGNED_URL_EXPIRY_HOURS = 4;
@@ -466,7 +467,7 @@ export class VideoOrchestrator {
         // Re-sign stored audio keys (signed URLs may have expired)
         perSceneAudio = await Promise.all(
           resumePerSceneAudio.map(async (stored) => {
-            const audioUrl = await this.deps.storageService.getSignedUrl(stored.audioKey, 3600);
+            const audioUrl = await resolveAudioSrc(this.deps.storageService,stored.audioKey, 3600);
             return {
               sceneNumber: stored.sceneNumber,
               audioBuffer: null,
@@ -650,7 +651,7 @@ export class VideoOrchestrator {
         }
         const audioKey = `audio/${context.repoFullName}/${context.prNumber}/${jobId}/scene-${narration.sceneNumber}.ogg`;
         await this.deps.storageService.upload(audioKey, narration.audioBuffer, "audio/ogg");
-        const audioUrl = await this.deps.storageService.getSignedUrl(audioKey, 3600);
+        const audioUrl = await resolveAudioSrc(this.deps.storageService,audioKey, 3600);
         logger.debug("Scene audio uploaded", { sceneNumber: narration.sceneNumber, audioKey });
         return { ...narration, audioKey, audioUrl };
       }),

@@ -3,8 +3,20 @@ import { redirect } from "next/navigation";
 import { verifyToken } from "@/lib/shareToken";
 import { getContainer } from "@/config/container";
 import { createLogger } from "@/lib/logger";
+import { resolveVideoUrlForWatch } from "@/lib/storage/resolveVideoUrlForWatch";
 
 const logger = createLogger("watch/page");
+
+const DEFAULT_SIGNED_URL_EXPIRY_HOURS = 4;
+
+function resolveSignedUrlExpirySeconds(): number {
+  const parsed = Number.parseInt(process.env.SIGNED_URL_EXPIRY_HOURS ?? "", 10);
+  const hours =
+    Number.isFinite(parsed) && parsed > 0
+      ? Math.min(parsed, 168)
+      : DEFAULT_SIGNED_URL_EXPIRY_HOURS;
+  return hours * 3600;
+}
 
 interface WatchPageProps {
   params: Promise<{ jobId: string }>;
@@ -43,7 +55,14 @@ export async function generateMetadata({
       description: `Code review walkthrough for ${prTitle}`,
       robots: "noindex",
     };
-  } catch {
+  } catch (err) {
+    // Log even though we fall back to the generic title — without this,
+    // a misconfigured backend (DB down, missing STORAGE_URL_SECRET, etc.)
+    // produces a generic-titled page with no operator-visible trace.
+    logger.warn("Watch metadata generation failed", {
+      jobId,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return { title: "PrVod", robots: "noindex" };
   }
 }
@@ -82,7 +101,24 @@ export default async function WatchPage({ params, searchParams }: WatchPageProps
       return <ExpiredPage message="This walkthrough is no longer available." />;
     }
 
-    videoUrl = job.videoUrl;
+    // Prefer re-signing from objectKey so legacy `file://` rows heal at
+    // read time and signed URLs minted here are fresh (storage-side
+    // expiry resets on each page load). Fall back to the stored URL
+    // when objectKey is absent, but strip unplayable `file://` values.
+    ({ videoUrl } = await resolveVideoUrlForWatch({
+      storageService: container.storageService,
+      objectKey: job.objectKey,
+      storedVideoUrl: job.videoUrl,
+      expirySeconds: resolveSignedUrlExpirySeconds(),
+      jobId,
+      logger,
+    }));
+
+    if (!videoUrl) {
+      logger.debug("Watch page: unable to produce playable URL", { jobId });
+      return <ExpiredPage message="This walkthrough is no longer available." />;
+    }
+
     repoFullName = job.repoFullName;
     prNumber = job.prNumber;
     const metrics = job.metricsJson as Record<string, unknown> | null;
