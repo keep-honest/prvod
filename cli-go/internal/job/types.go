@@ -5,6 +5,7 @@ package job
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -58,8 +59,9 @@ type Poller interface {
 
 // AwaitTerminal polls a job until it reaches a terminal state or the poll budget
 // is exhausted. A nil maxPolls means poll indefinitely. It mirrors awaitTerminal
-// in src/cli/local-test.ts, including the per-poll status log line.
-func AwaitTerminal(p Poller, jobID string, initial *Response, maxPolls *int, pollInterval time.Duration) (*Response, error) {
+// in src/cli/local-test.ts, including the per-poll status log line, which is
+// written to out so callers (and tests) can redirect it.
+func AwaitTerminal(out io.Writer, p Poller, jobID string, initial *Response, maxPolls *int, pollInterval time.Duration) (*Response, error) {
 	current := initial
 	for i := 0; maxPolls == nil || i < *maxPolls; i++ {
 		if IsTerminal(current.Status) {
@@ -71,7 +73,7 @@ func AwaitTerminal(p Poller, jobID string, initial *Response, maxPolls *int, pol
 			return nil, err
 		}
 		current = next
-		fmt.Printf("  Poll %d: status=%s\n", i+1, current.Status)
+		fmt.Fprintf(out, "  Poll %d: status=%s\n", i+1, current.Status)
 	}
 	return current, nil
 }

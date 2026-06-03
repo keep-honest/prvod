@@ -11,8 +11,18 @@ import (
 	"github.com/keep-honest/prvod/cli-go/cmd"
 )
 
+// Build-time variables. Overridden via -ldflags '-X main.Version=...' by the
+// release workflow / Makefile so `prvodctl --version` reports the published
+// release. Defaults reflect a from-source build.
+var (
+	Version = "dev"
+	Commit  = "none"
+	Date    = "unknown"
+)
+
 func main() {
-	if err := cmd.Execute(); err != nil {
+	info := cmd.BuildInfo{Version: Version, Commit: Commit, Date: Date}
+	if err := cmd.Execute(info); err != nil {
 		if msg := err.Error(); msg != "" {
 			fmt.Fprintln(os.Stderr, msg)
 		}

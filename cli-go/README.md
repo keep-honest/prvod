@@ -6,14 +6,56 @@ it gathers a git diff (or a diff file) locally, submits a job over HTTP, polls
 until the job finishes, and prints the resulting script, TTS preview, or video
 URL. All heavy lifting (script generation, TTS, video) happens server-side.
 
-## Build
+## Install
+
+### From a release (recommended)
+
+The install script detects your OS/arch, downloads the matching binary from
+the latest GitHub Release, verifies its SHA256, and places it in
+`/usr/local/bin` (or `$HOME/.local/bin` if that's not writable):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keep-honest/prvod/main/cli-go/install.sh | sh
+```
+
+Pin a specific release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keep-honest/prvod/main/cli-go/install.sh | PRVODCTL_VERSION=v0.1.0 sh
+```
+
+Override the install location:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keep-honest/prvod/main/cli-go/install.sh | PRVODCTL_INSTALL_DIR=$HOME/bin sh
+```
+
+Or download an archive directly from the
+[Releases page](https://github.com/keep-honest/prvod/releases/latest) and
+extract `prvodctl` into a directory on your `PATH`. Each release ships a
+`SHA256SUMS` file you can verify against.
+
+Windows: the install script is POSIX-only; download the `.zip` from the
+Releases page and place `prvodctl.exe` on your `PATH`.
+
+## Build from source
 
 ```bash
 cd cli-go
+make            # builds ./prvodctl
+# or, without make:
 go build -o prvodctl .
 ```
 
-Requires Go 1.22+. Run the tests with `go test ./...`.
+Requires Go 1.25+. Run the tests with `make test` (or `go test ./...`). Run
+`make help` for the full list of targets (`test-race`, `cover`, `vet`, `fmt`,
+`dist` for cross-compilation, `install`, `clean`).
+
+Verify the build:
+
+```bash
+./prvodctl --version
+```
 
 ## Usage
 
@@ -25,6 +67,12 @@ prvodctl --server-url http://localhost:3000 --api-key <key> [options]
 
 - **Normal** (default): builds a job from the current git repo
   (`git diff HEAD~1..HEAD`, origin remote, current branch, last commit subject).
+  **Streams the diff via the `application/x-git-diff` upload branch (100 MB
+  cap)** by default — equivalent to passing `--stream-diff`. The server-side
+  job carries synthetic `repoFullName`/`prNumber` (same as `--diff-file`).
+- **`--no-stream-diff`**: opts out of streaming and uploads the diff inline
+  as JSON instead (server cap **5 MB**, real `repoFullName`/`prNumber`
+  preserved). Required if you want to send `--pr-number` with real metadata.
 - **`--diff-file <path>`**: streams a local unified-diff file to the server
   instead of using git.
 - **`--retry-job <id>`**: retries a previously failed job.
@@ -46,6 +94,8 @@ prvodctl --server-url http://localhost:3000 --api-key <key> [options]
 | `--pr-number` | 1 | PR number |
 | `--title` | last commit subject | PR title |
 | `--diff-file` | — | Local unified-diff file |
+| `--stream-diff` | **true** | Stream the git diff via the 100 MB upload branch (default) |
+| `--no-stream-diff` | false | Use the legacy JSON branch (5 MB cap) instead of streaming |
 | `--retry-job` | — | Job ID to retry |
 | `--max-polls` | env `CLI_MAX_POLLS`, unlimited | Max polling attempts |
 | `--poll-interval-ms` | env `CLI_POLL_INTERVAL_MS`, 5000 | Poll interval (ms) |
@@ -83,7 +133,7 @@ fallbacks (`SERVER_URL`, `API_SECRET_KEY`, `CLI_MAX_POLLS`,
 |------|---------|
 | 0 | Success |
 | 1 | Generic error / job failed / timeout |
-| 2 | `--diff-file` combined with a mutually exclusive flag |
+| 2 | `--diff-file` or `--stream-diff` combined with a mutually exclusive flag |
 | 3 | Diff file missing or empty |
 | 4 | Diff file is not a unified diff (must start with `diff --git`) |
 | 5 | Server `DIFF_TOO_LARGE` |
@@ -93,7 +143,7 @@ fallbacks (`SERVER_URL`, `API_SECRET_KEY`, `CLI_MAX_POLLS`,
 ## Examples
 
 ```bash
-# Script only, from the last commit
+# Script only, from the last commit (streams via the 100 MB branch by default)
 prvodctl --server-url $SERVER_URL --api-key $API_SECRET_KEY --script-only
 
 # TTS preview from the working tree, written to a file
@@ -101,6 +151,9 @@ prvodctl --uncommitted --tts-only --output out.json
 
 # Upload a saved diff
 prvodctl --diff-file changes.patch --popcorn
+
+# Use the legacy JSON branch (5 MB cap) to preserve real --pr-number metadata
+prvodctl --no-stream-diff --pr-number 42 --script-only
 
 # Retry a failed job
 prvodctl --retry-job 550e8400-e29b-41d4-a716-446655440000
