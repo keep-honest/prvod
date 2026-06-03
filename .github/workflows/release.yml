@@ -1,0 +1,247 @@
+name: Release prvodctl
+
+# Triggered either by pushing a semver tag (e.g. `v0.1.0`, `v1.2.3-rc1`) or
+# manually via the Actions UI. The workflow_dispatch path lets you re-run a
+# release for an existing tag if the first attempt failed midway.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing tag to release (e.g. v0.1.0). The tag must already point at the commit you want to ship.'
+        required: true
+        type: string
+
+permissions:
+  contents: write  # required for softprops/action-gh-release to create the Release
+
+concurrency:
+  group: release-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+# Same strict semver pattern reused by every version-validation step. Keep this
+# in sync with the install.sh check.
+env:
+  VERSION_REGEX: '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: linux,   arch: amd64 }
+          - { os: linux,   arch: arm64 }
+          - { os: darwin,  arch: amd64 }
+          - { os: darwin,  arch: arm64 }
+          - { os: windows, arch: amd64 }
+    runs-on: ubuntu-latest
+    steps:
+      # Resolve the version BEFORE checkout so we can fetch the right ref.
+      # workflow_dispatch passes the version as an input; tag pushes use the
+      # ref name (`refs/tags/v0.1.0` → `v0.1.0`).
+      - name: Resolve version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="$REF_NAME"
+          fi
+          if ! printf '%s' "$version" | grep -Eq "$VERSION_REGEX"; then
+            echo "::error::version $version does not match $VERSION_REGEX"
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      # Check out at the tag, not at the workflow's default branch. On tag
+      # pushes this is the same as github.sha; on workflow_dispatch this is
+      # the commit the input tag points to, which is what we actually want to
+      # ship.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ver.outputs.version }}
+          fetch-depth: 0
+
+      # Reject workflow_dispatch invocations whose input doesn't name an
+      # existing tag — the alternative is silently creating the tag at the
+      # workflow's checkout SHA, which the input description forbids.
+      - name: Require the tag to already exist
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if ! git rev-parse --verify "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "::error::tag ${VERSION} does not exist; create the tag first or use workflow_dispatch only for re-runs"
+            exit 1
+          fi
+          # Resolve the tagged commit so the build stamp is honest.
+          tag_commit=$(git rev-parse "refs/tags/${VERSION}^{commit}")
+          printf 'tag_commit=%s\n' "$tag_commit" >> "$GITHUB_OUTPUT"
+        id: tag
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli-go/go.mod
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Build prvodctl (${{ matrix.os }}/${{ matrix.arch }})
+        working-directory: cli-go
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG_COMMIT: ${{ steps.tag.outputs.tag_commit }}
+        run: |
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          commit_short=$(printf '%s' "$TAG_COMMIT" | cut -c1-7)
+          date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X main.Version=${VERSION} \
+              -X main.Commit=${commit_short} \
+              -X main.Date=${date_utc}" \
+            -o "prvodctl${ext}" .
+
+      - name: Package archive
+        working-directory: cli-go
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: |
+          name="prvodctl-${VERSION}-${MATRIX_OS}-${MATRIX_ARCH}"
+          mkdir -p "dist/${name}"
+          ext=""
+          if [ "$MATRIX_OS" = "windows" ]; then ext=".exe"; fi
+          cp "prvodctl${ext}" "dist/${name}/"
+          cp README.md "dist/${name}/"
+          # Repo-level LICENSE if it exists; ignore if not.
+          if [ -f ../LICENSE ]; then cp ../LICENSE "dist/${name}/"; fi
+          cd dist
+          if [ "$MATRIX_OS" = "windows" ]; then
+            zip -r "${name}.zip" "${name}" >/dev/null
+          else
+            tar -czf "${name}.tar.gz" "${name}"
+          fi
+          # Drop the unpacked dir; only the archive should be uploaded.
+          rm -rf "${name}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prvodctl-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            cli-go/dist/prvodctl-*.tar.gz
+            cli-go/dist/prvodctl-*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and validate version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="$REF_NAME"
+          fi
+          # Defence in depth: the build job already validated, but if it ever
+          # got re-runnable in isolation this step is the last gate before
+          # publishing.
+          if ! printf '%s' "$version" | grep -Eq "$VERSION_REGEX"; then
+            echo "::error::version $version does not match $VERSION_REGEX"
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download all matrix artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # We expect exactly one archive per matrix entry. Fail loudly if any are
+      # missing so a half-published release can never escape.
+      - name: Assert artifact count
+        working-directory: artifacts
+        run: |
+          # find avoids the `ls 2>/dev/null` pattern that would swallow real
+          # I/O / permission errors; it returns 0 with no output for a clean
+          # no-match, and non-zero for an actual error.
+          count=$(find . -maxdepth 1 \( -name 'prvodctl-*.tar.gz' -o -name 'prvodctl-*.zip' \) -type f | wc -l | tr -d ' ')
+          if [ "$count" -lt 5 ]; then
+            echo "::error::expected 5 platform archives, found $count"
+            ls -la
+            exit 1
+          fi
+
+      - name: Generate SHA256SUMS
+        working-directory: artifacts
+        # Use bash with pipefail so `find | sort | xargs sha256sum` aborts on
+        # any failure in the pipeline (e.g. an unreadable artifact). Default
+        # shell is `bash --noprofile --norc -eo pipefail` already on
+        # ubuntu-latest runners but we set it explicitly for clarity.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `find -print0 | xargs -0` avoids word-splitting issues if a name
+          # ever contains whitespace; the version regex prevents that today
+          # but the cost of being safe is one extra flag.
+          #
+          # Critical: use GNU find's `-printf '%f\0'` (bare basenames, no
+          # leading `./`) so the SHA256SUMS entries match install.sh's
+          # `awk -v a="$ASSET" '$2 == a'` lookup. If we let find emit
+          # `./prvodctl-…`, sha256sum echoes that verbatim and every
+          # install-script SHA verification fails to find a match.
+          find . -maxdepth 1 \( -name 'prvodctl-*.tar.gz' -o -name 'prvodctl-*.zip' \) -type f -printf '%f\0' \
+            | sort -z \
+            | xargs -0 sha256sum -- > SHA256SUMS
+          # Sanity: assertion above gates count>=5; if any sha256sum entry
+          # is missing the file would be short. Verify line count matches.
+          archives=$(find . -maxdepth 1 \( -name 'prvodctl-*.tar.gz' -o -name 'prvodctl-*.zip' \) -type f | wc -l | tr -d ' ')
+          sums=$(wc -l < SHA256SUMS | tr -d ' ')
+          if [ "$archives" != "$sums" ]; then
+            echo "::error::SHA256SUMS has $sums entries for $archives archives"
+            exit 1
+          fi
+          cat SHA256SUMS
+
+      - name: Detect prerelease
+        id: pre
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if printf '%s' "$VERSION" | grep -Eq -- '-(rc|beta|alpha|pre)'; then
+            printf 'prerelease=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'prerelease=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: prvodctl ${{ steps.ver.outputs.version }}
+          draft: false
+          prerelease: ${{ steps.pre.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/prvodctl-*.tar.gz
+            artifacts/prvodctl-*.zip
+            artifacts/SHA256SUMS
