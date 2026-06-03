@@ -2,6 +2,7 @@
 import { execFileSync } from "child_process";
 import { writeFileSync, createReadStream, statSync, openSync, readSync, closeSync } from "fs";
 import { resolve as resolvePath } from "path";
+import { Readable } from "stream";
 
 // --- Arg parsing ---
 
@@ -21,16 +22,22 @@ interface CliArgs {
   maxPolls: number | null;
   pollIntervalMs: number;
   diffFile: string | null;
+  streamDiff: boolean;
 }
 
 const DEFAULT_GIT_MAX_BUFFER_MB = 64;
+// When --stream-diff is set the user has opted into the 100 MB upload branch;
+// give git enough headroom to actually produce a diff that size before the
+// server cap fires. The env override always wins so power users keep control.
+const STREAM_DIFF_DEFAULT_GIT_MAX_BUFFER_MB = 110;
 
 export function resolveGitMaxBufferBytes(
   env: Record<string, string | undefined> = process.env,
+  defaultMb: number = DEFAULT_GIT_MAX_BUFFER_MB,
 ): number {
   const parsed = Number.parseInt(env.CLI_GIT_MAX_BUFFER_MB ?? "", 10);
   const maxBufferMb =
-    Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GIT_MAX_BUFFER_MB;
+    Number.isFinite(parsed) && parsed > 0 ? parsed : defaultMb;
   return maxBufferMb * 1024 * 1024;
 }
 
@@ -64,7 +71,9 @@ Options:
   --uncommitted        Use 'git diff HEAD' instead of 'git diff HEAD~1..HEAD'
   --pr-number <n>      PR number (default: 1)
   --title <text>       PR title (default: last commit message)
-  --diff-file <path>   Use a local unified-diff file instead of git (mutually exclusive with --pr-number, --title, --uncommitted, --retry-job)
+  --diff-file <path>   Use a local unified-diff file instead of git (mutually exclusive with --pr-number, --title, --uncommitted, --retry-job, --stream-diff)
+  --stream-diff        (default) Stream the git diff via the 100 MB upload branch. Mutually exclusive with --diff-file, --retry-job, --pr-number.
+  --no-stream-diff     Use the legacy JSON branch (5 MB cap) instead of streaming. Required to send --pr-number with real metadata.
   --retry-job <id>     Retry a failed job by ID (skips job creation)
   --max-polls <n>      Max polling attempts (or env CLI_MAX_POLLS, default: unlimited)
   --poll-interval-ms <n> Poll interval in ms (or env CLI_POLL_INTERVAL_MS, default: 5000)
@@ -130,15 +139,57 @@ export function parseArgs(argv: string[]): CliArgs {
     process.exit(1);
   }
 
+  // --stream-diff is now the default. Forms accepted (mirroring Go's
+  // cobra/pflag bool parsing):
+  //   --stream-diff           → explicit-on
+  //   --stream-diff=true|1    → explicit-on
+  //   --stream-diff=false|0   → explicit-off (equivalent to --no-stream-diff)
+  //   --no-stream-diff        → explicit-off
+  // Any other --stream-diff=X is rejected as malformed.
+  let streamDiffExplicit = false;
+  let streamDiffValue: boolean | null = null;
+  for (const a of args) {
+    if (a === "--stream-diff") {
+      streamDiffExplicit = true;
+      streamDiffValue = true;
+    } else if (a.startsWith("--stream-diff=")) {
+      const v = a.slice("--stream-diff=".length).toLowerCase();
+      if (v === "true" || v === "1") {
+        streamDiffExplicit = true;
+        streamDiffValue = true;
+      } else if (v === "false" || v === "0") {
+        streamDiffExplicit = true;
+        streamDiffValue = false;
+      } else {
+        console.error(`Error: --stream-diff=${v} is not a valid boolean (use true or false)`);
+        process.exit(2);
+      }
+    }
+  }
+  const noStreamDiff = args.includes("--no-stream-diff");
+  if (streamDiffValue === true && noStreamDiff) {
+    console.error("Error: --stream-diff and --no-stream-diff are mutually exclusive");
+    process.exit(2);
+  }
+  // Resolve to the effective boolean. Default is true. --no-stream-diff or
+  // --stream-diff=false both flip it off.
+  const streamDiff = noStreamDiff ? false : streamDiffValue !== false;
+
   const diffFileRaw = getValue("--diff-file");
   let diffFile: string | null = null;
   if (diffFileRaw) {
-    // Mutual exclusion checks (exit code 2)
+    // Mutual exclusion checks (exit code 2). `--stream-diff` only conflicts
+    // here when the user passed it *explicitly* — the default-true value is
+    // overridden by being in --diff-file mode.
     const mutuallyExclusive: [boolean, string][] = [
       [getFlag("--pr-number") || args.includes("--pr-number"), "--pr-number"],
       [getValue("--title") !== null, "--title"],
       [getFlag("--uncommitted"), "--uncommitted"],
       [getValue("--retry-job") !== null, "--retry-job"],
+      // Only flag when the user explicitly asked for streaming ON; the
+      // explicit-off form (--stream-diff=false) is functionally identical
+      // to --no-stream-diff and should not collide with --diff-file mode.
+      [streamDiffExplicit && streamDiff, "--stream-diff"],
     ];
     for (const [present, flag] of mutuallyExclusive) {
       if (present) {
@@ -179,6 +230,31 @@ export function parseArgs(argv: string[]): CliArgs {
     diffFile = resolved;
   }
 
+  // Explicit `--stream-diff=true` cannot coexist with --retry-job (different
+  // action). `--stream-diff=false` is the opt-out path and does not conflict;
+  // the --diff-file case is already covered by the mutex block above.
+  if (streamDiffExplicit && streamDiff && getValue("--retry-job") !== null) {
+    console.error("Error: --stream-diff is mutually exclusive with --retry-job");
+    process.exit(2);
+  }
+
+  // If streaming will actually be the upload path (i.e. normal git-source
+  // mode and streamDiff active), --pr-number is silently ignored by the
+  // server. Fail fast with a clear migration hint instead of letting the
+  // user's PR number disappear into the synthetic prNumber=1 default.
+  const inNormalMode =
+    diffFileRaw === null && getValue("--retry-job") === null;
+  const prNumberExplicit =
+    getValue("--pr-number") !== null ||
+    args.some((a) => a === "--pr-number" || a.startsWith("--pr-number="));
+  if (streamDiff && inNormalMode && prNumberExplicit) {
+    console.error(
+      "Error: --pr-number is not honored in streaming mode (the default). " +
+        "Pass --no-stream-diff to send the PR number via the legacy JSON branch.",
+    );
+    process.exit(2);
+  }
+
   return {
     serverUrl: serverUrl.replace(/\/$/, ""),
     apiKey,
@@ -195,16 +271,17 @@ export function parseArgs(argv: string[]): CliArgs {
     maxPolls,
     pollIntervalMs,
     diffFile,
+    streamDiff,
   };
 }
 
 // --- Git helpers ---
 
-function gitExec(args: string[]): string {
+function gitExec(args: string[], defaultMb: number = DEFAULT_GIT_MAX_BUFFER_MB): string {
   try {
     return execFileSync("git", args, {
       encoding: "utf-8",
-      maxBuffer: resolveGitMaxBufferBytes(),
+      maxBuffer: resolveGitMaxBufferBytes(process.env, defaultMb),
     }).trim();
   } catch (error) {
     if (
@@ -213,7 +290,7 @@ function gitExec(args: string[]): string {
       "code" in error &&
       (error as { code?: string }).code === "ENOBUFS"
     ) {
-      const maxBufferMb = resolveGitMaxBufferBytes() / (1024 * 1024);
+      const maxBufferMb = resolveGitMaxBufferBytes(process.env, defaultMb) / (1024 * 1024);
       console.error(
         `Error: git ${args.join(" ")} output exceeded buffer (${maxBufferMb}MB). ` +
           "Increase CLI_GIT_MAX_BUFFER_MB and try again.",
@@ -247,7 +324,12 @@ function gatherGitInfo(args: CliArgs): {
   const diffArgs = args.uncommitted
     ? ["diff", "HEAD"]
     : ["diff", "HEAD~1..HEAD"];
-  const diff = gitExec(diffArgs);
+  // --stream-diff opts the user into the 100 MB server branch; size the local
+  // git buffer to match by default (overridable via CLI_GIT_MAX_BUFFER_MB).
+  const diffDefaultMb = args.streamDiff
+    ? STREAM_DIFF_DEFAULT_GIT_MAX_BUFFER_MB
+    : DEFAULT_GIT_MAX_BUFFER_MB;
+  const diff = gitExec(diffArgs, diffDefaultMb);
 
   if (!diff) {
     console.error("Error: git diff returned empty output. Nothing to process.");
@@ -313,7 +395,25 @@ export function buildCreateJobPayload(
   return payload;
 }
 
-/** Shared fetch wrapper: throws on non-2xx with a descriptive message. */
+/**
+ * APIError carries the server's structured `{error, message}` shape when the
+ * response is a non-2xx. The errorCode lets callers map e.g. a create-time 413
+ * DIFF_TOO_LARGE to exit code 5, matching the polling-time contract.
+ */
+export class APIError extends Error {
+  readonly label: string;
+  readonly status: number;
+  readonly errorCode: string | null;
+  constructor(label: string, status: number, errorCode: string | null, detail: string) {
+    super(`${label} failed (${status}): ${detail}`);
+    this.name = "APIError";
+    this.label = label;
+    this.status = status;
+    this.errorCode = errorCode;
+  }
+}
+
+/** Shared fetch wrapper: throws APIError on non-2xx with a descriptive message. */
 async function apiFetch(
   url: string,
   label: string,
@@ -323,7 +423,18 @@ async function apiFetch(
   if (!res.ok) {
     const body = await res.text();
     const detail = body.trim() || res.statusText || "<empty response body>";
-    throw new Error(`${label} failed (${res.status}): ${detail}`);
+    // Best-effort: extract the standardized `error` field so callers can map
+    // it to the documented exit codes.
+    let errorCode: string | null = null;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed.error === "string") {
+        errorCode = parsed.error;
+      }
+    } catch {
+      /* response wasn't JSON; that's fine */
+    }
+    throw new APIError(label, res.status, errorCode, detail);
   }
   return res.json() as Promise<JobResponse>;
 }
@@ -342,6 +453,48 @@ async function createJob(
     headers: { "Content-Type": "application/json", ...authHeaders(apiKey) },
     body: JSON.stringify(payload),
   });
+}
+
+/**
+ * Maps a server-reported job error code to the CLI process exit code,
+ * defaulting to 1 for unmapped or missing codes. Exported so tests can pin the
+ * `--diff-file` / `--stream-diff` / normal-mode contract.
+ */
+export function mapDiffExitCode(errorCode: string | null | undefined): number {
+  const DIFF_EXIT_CODES: Record<string, number> = {
+    DIFF_TOO_LARGE: 5,
+    DIFF_PARSE_ERROR: 6,
+    DIFF_FETCH_TIMEOUT: 7,
+  };
+  return DIFF_EXIT_CODES[errorCode ?? ""] ?? 1;
+}
+
+/**
+ * Submits a job via the `application/x-git-diff` streaming branch (100 MB cap)
+ * using a diff already buffered in memory. Used by `--stream-diff` so users
+ * with large diffs don't have to write to a file first.
+ */
+export async function createJobFromDiffStream(
+  serverUrl: string,
+  apiKey: string,
+  diff: Buffer,
+  query: URLSearchParams,
+): Promise<JobResponse> {
+  return apiFetch(
+    `${serverUrl}/api/jobs?${query.toString()}`,
+    "POST /api/jobs (stream-diff)",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-diff",
+        "X-Diff-Source": "local-stream",
+        "Content-Length": String(diff.byteLength),
+        ...authHeaders(apiKey),
+      },
+      body: Readable.from([diff]) as unknown as BodyInit,
+      duplex: "half",
+    } as unknown as RequestInit,
+  );
 }
 
 async function pollJob(
@@ -551,12 +704,7 @@ async function main(): Promise<void> {
     if (diffCurrent.status === "failed") {
       const code = diffCurrent.errorCode ? ` (${diffCurrent.errorCode})` : "";
       console.error(`\nJob failed${code}: ${diffCurrent.errorMessage}`);
-      const DIFF_EXIT_CODES: Record<string, number> = {
-        DIFF_TOO_LARGE: 5,
-        DIFF_PARSE_ERROR: 6,
-        DIFF_FETCH_TIMEOUT: 7,
-      };
-      process.exit(DIFF_EXIT_CODES[diffCurrent.errorCode ?? ""] ?? 1);
+      process.exit(mapDiffExitCode(diffCurrent.errorCode));
     }
     if (diffCurrent.status !== "completed") {
       console.error(`\nJob did not complete in time (status: ${diffCurrent.status})`);
@@ -572,7 +720,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  // --- Normal mode ---
+  // --- Normal / --stream-diff mode ---
+  // Both gather the diff via git and render the same header lines. They
+  // differ only on the wire: normal mode embeds the diff in JSON (5 MB cap);
+  // --stream-diff streams it via application/x-git-diff (100 MB cap).
   const git = gatherGitInfo(args);
 
   console.log(`Repo:        ${git.repoFullName}`);
@@ -585,19 +736,38 @@ async function main(): Promise<void> {
   console.log(`Server:      ${args.serverUrl}`);
   console.log();
 
-  const payload = buildCreateJobPayload(
-    {
-      prNumber: args.prNumber,
-      scriptOnly: args.scriptOnly,
-      ttsOnly: args.ttsOnly,
-      deepdive: args.deepdive,
-      durationMode: args.popcorn ? "popcorn" : args.shortDur ? "short" : "default",
-    },
-    git,
-  );
+  const durationMode = args.popcorn ? "popcorn" : args.shortDur ? "short" : "default";
 
-  console.log("Creating job...");
-  const job = await createJob(args.serverUrl, args.apiKey, payload);
+  let job: JobResponse;
+  if (args.streamDiff) {
+    const query = new URLSearchParams({
+      scriptOnly: String(args.scriptOnly),
+      ttsOnly: String(args.ttsOnly),
+      deepdive: String(args.deepdive),
+      durationMode,
+      prTitle: git.title,
+    });
+    console.log("Creating job (streaming diff)...");
+    job = await createJobFromDiffStream(
+      args.serverUrl,
+      args.apiKey,
+      Buffer.from(git.diff, "utf-8"),
+      query,
+    );
+  } else {
+    const payload = buildCreateJobPayload(
+      {
+        prNumber: args.prNumber,
+        scriptOnly: args.scriptOnly,
+        ttsOnly: args.ttsOnly,
+        deepdive: args.deepdive,
+        durationMode,
+      },
+      git,
+    );
+    console.log("Creating job...");
+    job = await createJob(args.serverUrl, args.apiKey, payload);
+  }
   console.log(`Job created: ${job.id} (status: ${job.status})`);
   const current = await awaitTerminal(
     args.serverUrl, args.apiKey, job.id,
@@ -607,7 +777,9 @@ async function main(): Promise<void> {
   if (current.status === "failed") {
     const code = current.errorCode ? ` (${current.errorCode})` : "";
     console.error(`\nJob failed${code}: ${current.errorMessage}`);
-    process.exit(1);
+    // Map server-side diff errors to the same exit codes as --diff-file so
+    // CI tooling sees a consistent contract regardless of upload path.
+    process.exit(mapDiffExitCode(current.errorCode));
   }
 
   if (current.status !== "completed") {
@@ -662,6 +834,12 @@ const isDirectRun =
 if (isDirectRun) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : err);
+    // Map server-side diff errors that surface at create time (e.g. a 413
+    // DIFF_TOO_LARGE from POST /api/jobs) to the same exit codes the polling
+    // path uses for terminal failures, matching the README contract.
+    if (err instanceof APIError) {
+      process.exit(mapDiffExitCode(err.errorCode));
+    }
     process.exit(1);
   });
 }
