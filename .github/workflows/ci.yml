@@ -34,3 +34,36 @@ jobs:
         run: npm test
         env:
           NODE_ENV: test
+
+  cli-go:
+    name: prvodctl (Go CLI)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli-go
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli-go/go.mod
+          cache-dependency-path: cli-go/go.sum
+
+      - name: gofmt
+        run: |
+          # gofmt -l prints any files that aren't formatted; fail if non-empty.
+          # The `-path ./vendor -prune` guard is a no-op today (the project
+          # is not vendored) but kept defensively so a future `go mod vendor`
+          # doesn't suddenly fail the gofmt sweep on upstream code.
+          unformatted=$(gofmt -l $(find . -path ./vendor -prune -o -name '*.go' -print))
+          if [ -n "$unformatted" ]; then
+            echo "::error::Unformatted Go files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...

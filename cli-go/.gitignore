@@ -1,0 +1,5 @@
+/prvodctl
+# `go build .` from inside this directory produces a binary named after the
+# directory (`cli-go`), which is never the intended artifact. Ignoring it so
+# the stray binary can't be accidentally staged.
+/cli-go
