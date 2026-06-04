@@ -1,0 +1,153 @@
+---
+title: Quick start
+description: Clean checkout to your first PRVOD walkthrough. Linear path, one command per step. Setup is quick; first walkthrough renders in 8–15 minutes.
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from "@astrojs/starlight/components";
+
+This page takes you from a clean machine to a finished video walkthrough. The path is linear: one command per step, no branching. Setup steps (1–5) should each complete in under a minute on a warm machine — if one hangs, open a [GitHub issue](https://github.com/keep-honest/prvod/issues) and we will fix the quick start, not your machine. Step 6 (the actual walkthrough generation) takes 8–15 minutes because the LLM script and judge passes dominate; that is expected, not a stall.
+
+## Prerequisites
+
+You need:
+
+- **Docker** (Docker Desktop or equivalent). Required for the Postgres container.
+- **Node.js 22+**. Required for the local Next.js dev server, the schema push, and the CLI.
+- **FFmpeg** on `PATH`. Required by the default video compositor. Install with `brew install ffmpeg` (macOS) or `sudo apt install ffmpeg` (Debian/Ubuntu).
+
+For the script-writer you need credentials for one of:
+
+- **Anthropic SDK** (`SCRIPT_WRITER=claude-sdk`, the `.env.example` default): set `ANTHROPIC_API_KEY` — get one at [console.anthropic.com](https://console.anthropic.com).
+- **Claude CLI** (`SCRIPT_WRITER=claude-cli`): install and log into the [Claude CLI](https://docs.claude.com/en/docs/claude-code/cli-reference). No API key needed.
+- **Mock** (`SCRIPT_WRITER=mock`): no credentials, deterministic stub output. See [Run the mock-only pipeline](#run-the-mock-only-pipeline-no-api-keys) below.
+
+<Aside type="caution">
+The CLI quickstart below runs the Next.js dev server on your host (`npm run dev` → `NODE_ENV=development`). That is what keeps `/api/jobs` and the CLI working — the `docker compose up app` image is the production-shape build, and `/api/jobs` is intentionally 404'd there (see `src/lib/jobsApiAccess.ts`). The compose image is meant for testing the [GitHub App webhook](#trigger-from-a-real-pull-request) flow, not for the CLI.
+</Aside>
+
+<Aside type="tip">
+The fastest path: Postgres in Docker + `npm run dev` on the host + one CLI command. Setup is a handful of commands; the first walkthrough renders in 8–15 minutes (LLM stages dominate).
+</Aside>
+
+## The path
+
+<Steps>
+
+1. **Clone the repo, install host deps, install `prvodctl`.** `npm ci` is for the server build; `prvodctl` is the CLI you'll point at it from the second terminal in step 6.
+
+   ```bash
+   git clone https://github.com/keep-honest/prvod.git
+   cd prvod
+   npm ci
+   curl -fsSL https://raw.githubusercontent.com/keep-honest/prvod/main/cli-go/install.sh | sh
+   prvodctl --version
+   ```
+
+   On Windows, grab the `.zip` from the [releases page](https://github.com/keep-honest/prvod/releases/latest) and put `prvodctl.exe` on `PATH`. There's also an in-repo Node CLI (`npm run cli -- <flags>`) with the same flag surface — useful while hacking on `src/cli/`, otherwise stick with `prvodctl`.
+
+2. **Start Postgres.**
+
+   ```bash
+   docker compose up db -d
+   ```
+
+   This binds Postgres on host port `5434` (so it doesn't collide with a local `5432`).
+
+3. **Apply the schema.**
+
+   ```bash
+   DATABASE_URL=postgresql://dev:dev@localhost:5434/pr_to_video npm run db:push
+   ```
+
+4. **Configure `.env` for local dev.** The Next.js dev server reads `.env` directly, so all keys go here. Generate the two HMAC secrets first and paste them in by hand — the quoted heredoc below keeps `$(...)` literal so nothing expands into your shell history.
+
+   ```bash
+   cp .env.example .env
+   openssl rand -hex 32   # copy this → STORAGE_URL_SECRET below
+   openssl rand -hex 32   # copy this → APP_ENCRYPTION_KEY below
+   cat >> .env <<'EOF'
+   DATABASE_URL=postgresql://dev:dev@localhost:5434/pr_to_video
+   ANTHROPIC_API_KEY=sk-ant-...
+   USE_BUILTIN_TTS=true
+   STORAGE_PROVIDER=local
+   STORAGE_URL_SECRET=<paste first openssl output>
+   APP_ENCRYPTION_KEY=<paste second openssl output>
+   API_SECRET_KEY=local-dev-key
+   EOF
+   ```
+
+   <Aside type="caution">
+   Don't substitute `$(openssl rand -hex 32)` inline in an unquoted heredoc — the expansion lands in `~/.zsh_history` / `~/.bash_history` as the literal expanded secret, which defeats the point of rotating these via `openssl`. Pre-generating + pasting (or piping through `set +o history`) is the safe pattern.
+   </Aside>
+
+   If you'd rather use the Claude CLI auth instead of an API key, swap `ANTHROPIC_API_KEY=...` for `SCRIPT_WRITER=claude-cli`.
+
+5. **Start the dev server.**
+
+   ```bash
+   npm run dev
+   ```
+
+   Wait for `Ready in NNN ms` and `http://localhost:3000`.
+
+6. **Generate a walkthrough from your current branch.** In a second terminal:
+
+   ```bash
+   prvodctl \
+     --server-url http://localhost:3000 \
+     --api-key local-dev-key \
+     --uncommitted
+   ```
+
+   `prvodctl` reads your local git diff, posts it to the server, and polls until the pipeline finishes. The diff streams via the `application/x-git-diff` upload branch (100 MB cap) by default; pass `--no-stream-diff` to fall back to the legacy JSON branch (5 MB cap) when you need the real `--pr-number` preserved. Expect 8–15 minutes for a standard-mode walkthrough on a typical PR-sized diff — the LLM script-generation and judge passes dominate wall-clock time. `local-dev-key` matches the `API_SECRET_KEY` you wrote into `.env` in step 4.
+
+   <Aside type="tip">
+   Drop a `prvodctl.yaml` (in `./`, `$XDG_CONFIG_HOME/prvodctl/`, or `~/.prvodctl.yaml`) with `server-url:` and `api-key:` keys and you can skip those flags every time. See [`cli-go/README.md`](https://github.com/keep-honest/prvod/blob/main/cli-go/README.md) for the full config schema and flag reference.
+   </Aside>
+
+7. **Open the video.** When `prvodctl` exits, it prints a review URL like `http://localhost:3000/reviews/<jobId>`. Open it in your browser. The walkthrough plays inline with synchronized captions.
+
+</Steps>
+
+## Trigger from a real pull request
+
+Once the local pipeline works, wire up the GitHub App so PRVOD posts walkthroughs on actual PRs.
+
+<Steps>
+
+1. **Register a GitHub App** at `github.com/settings/apps/new`. The full permission matrix and webhook setup live in the main repo at [README.md → GitHub App Webhook](https://github.com/keep-honest/prvod#github-app-webhook).
+
+2. **Set the app's env vars** in your `.env` (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_SLUG`, `GITHUB_APP_WEBHOOK_SECRET`, `APP_ENCRYPTION_KEY`).
+
+3. **Install the app** on the repos you want it to watch.
+
+4. **In any PR, write a comment containing `@prvod`.** The bot acknowledges immediately, runs the pipeline, then posts a second comment with the finished video URL.
+
+</Steps>
+
+Annotation variants:
+
+| Comment | What happens |
+| --- | --- |
+| `@prvod` | Standard walkthrough (20–120s), once per PR |
+| `@prvod short` | Short walkthrough (20–60s) |
+| `@prvod popcorn` | ~5-minute mini documentary covering every changed file |
+| `@prvod deepdive` | Reviewer-style narration, combinable with the above |
+| `@prvod script` | JSON script only, skip video generation |
+
+## Run the mock-only pipeline (no API keys)
+
+If you want to see the pipeline run end-to-end with no API keys or Claude CLI auth at all, swap the script-writer line in step 4's `.env` block:
+
+```bash
+SCRIPT_WRITER=mock
+TTS_PROVIDER=mock
+```
+
+Then run `npm run dev` and `prvodctl --uncommitted` as in step 6. The video will be a deterministic stub instead of a real LLM-generated walkthrough — useful for confirming your environment works before adding real credentials.
+
+## What's next
+
+- **[Concepts](/concepts/)** — what the pipeline actually does, scene by scene, and where the cost goes.
+- **[Compare](/compare/)** — how PRVOD differs from written PR descriptions, Loom, AI code-review tools, static doc sites, and code-coupled docs.
+- **[FAQ](/faq/)** — privacy, model swap-out, language support, and known limitations.

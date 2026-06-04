@@ -1,0 +1,73 @@
+---
+title: PRVOD docs
+description: PRVOD is an open-source tool that generates video walkthroughs for pull requests and codebases — a living knowledge base where the code is the source of truth.
+template: splash
+hero:
+  title: Watch any pull request explain itself
+  tagline: PRVOD is an open-source tool that generates video walkthroughs for pull requests and codebases — a living knowledge base where the code is the source of truth.
+  image:
+    file: ../../assets/hero-poster.png
+    alt: A real pull request, narrated end to end
+  actions:
+    - text: Generate your first walkthrough
+      link: /quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: How PRVOD compares
+      link: /compare/
+      icon: external
+      variant: minimal
+    - text: GitHub repo
+      link: https://github.com/keep-honest/prvod
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## Start here
+
+<CardGrid>
+  <Card title="Quick start" icon="rocket">
+    Postgres in Docker, `npm run dev` on your host, one CLI command. Setup is a handful of commands; the first walkthrough renders in 8–15 minutes.
+
+    [Start now →](/quickstart/)
+  </Card>
+  <Card title="Understand the pipeline" icon="puzzle">
+    Diff parsing, script generation with the Self-Refine judge loop, TTS, and FFmpeg composition — what each stage does and what it costs.
+
+    [Read concepts →](/concepts/)
+  </Card>
+  <Card title="Compare to your current setup" icon="approve-check">
+    PRVOD versus written PR descriptions, manual Loom recordings, AI code-review tools, static doc sites, and code-coupled docs. Trade-offs spelled out per row.
+
+    [See the comparison →](/compare/)
+  </Card>
+  <Card title="FAQ" icon="information">
+    Where the code goes, what self-host actually requires, which models are supported, and what PRVOD does badly.
+
+    [Read the FAQ →](/faq/)
+  </Card>
+</CardGrid>
+
+## What PRVOD produces
+
+A short narrated video that walks through a PR end-to-end, with synchronized captions and a permanent review page. Each walkthrough is generated from the diff itself — no recording, no manual scripting, no separate authoring step. The output is hosted at `/reviews/[jobId]` and `/watch/[jobId]` and can be shared with anyone who needs to see what shipped.
+
+Four modes cover the range of PR sizes:
+
+- **Standard** — 20–120 seconds, scaled to diff size.
+- **Short** — 20–60 second focused walkthrough.
+- **Popcorn** — ~5-minute deep tour through every changed file, built for PRs you would otherwise need a meeting to explain.
+- **Deepdive** — reviewer-style narration, combinable with any of the above.
+
+## Source code and hosted tier
+
+PRVOD is open source at [github.com/keep-honest/prvod](https://github.com/keep-honest/prvod). The hosted tier at [prvod.dev](https://prvod.dev) runs the same generation pipeline and adds the surface layer the OSS does not:
+
+- **User management** — orgs, roles, per-repo access, audit log.
+- **Two-way PR review surface** — comment on scenes or diff hunks in the player; comments round-trip to the GitHub PR as inline review comments.
+- **Walkthrough library** — every walkthrough your org has generated, in one searchable place indexed by repo, PR, author, and topic.
+- **Ongoing feature work** — new capabilities built on the open core ship to hosted first.
+
+Choose whichever fits your privacy, cost, and ops trade-offs. The [self-host vs hosted FAQ](/faq/#self-host-or-hosted) breaks down the decision.

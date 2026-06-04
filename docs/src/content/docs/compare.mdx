@@ -1,0 +1,147 @@
+---
+title: How PRVOD compares
+description: PRVOD versus written PR descriptions, manual Loom recordings, AI code-review tools, static doc sites, and code-coupled docs. Trade-offs spelled out per row.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+This page exists for two readers: the engineering leader trying to justify the line item, and the developer champion who has to defend the choice in a Slack thread. The framing is different for each, so the two audiences are split into separate sections below.
+
+If you are short on time, scroll to the [comparison table](#the-comparison-table) and the [honest limitations](#honest-limitations-of-prvod) section.
+
+## The comparison table
+
+| Dimension                | PRVOD                              | Written PR description       | Manual Loom recording         | AI code review (e.g. CodeRabbit) | Static docs (e.g. Mintlify)  | Code-coupled docs (e.g. Swimm) |
+| ------------------------ | ---------------------------------- | ---------------------------- | ----------------------------- | -------------------------------- | ---------------------------- | ------------------------------ |
+| Source of truth          | Diff + code                        | Author intent                | Author's screen at record time | Diff                             | Author-written prose         | Code-anchored text             |
+| Drift resistance         | Regenerated per PR                 | Frozen at write time         | Frozen at record time         | Per PR                           | Decays with every commit     | Snippet-anchored; prose drifts |
+| Authoring effort         | Zero — one annotation              | High — every PR              | Medium — every PR             | Zero                             | High — every change          | Medium — every change          |
+| Output format            | Narrated video + captions          | Text                         | Video                         | Text comments inline             | Text site                    | Text + code anchors            |
+| Onboarding fit           | Watch real PR history              | Read backlog of PR text      | If someone recorded it        | None                             | Read curated docs            | Read curated docs              |
+| PR-review context        | Per PR, automatic                  | Per PR, manual               | Per PR, manual                | Per PR, automatic                | None                         | None                           |
+| Cost model               | OSS / hosted tier                  | Free / engineer time         | Loom subscription + time      | Per-seat SaaS                    | Per-seat SaaS + author time  | Per-seat SaaS + author time    |
+| When code changes        | New walkthrough on next PR         | Stale unless edited          | Stale unless re-recorded      | New comments on next PR          | Doc rot unless updated       | Snippet still valid, prose may rot |
+
+## For the engineering lead
+
+Three numbers shape the ROI conversation. They are imperfect; the point is that they are non-zero and they compound.
+
+### Onboarding ramp
+
+The industry-cited baseline for "time to productive" for a new software engineer is **3–4 weeks**. The associated productivity-loss estimate from Full Scale puts the cost at **roughly $15,000 per hire** for the ramp period alone. Both figures vary by team, role, and tooling — but the order of magnitude is consistent across the engineering-management literature.
+
+Stale or distrusted docs lengthen the ramp. Once a new engineer learns the docs are unreliable, they revert to reading source code and pinging colleagues — both of which are slower than reading accurate docs would have been.
+
+The PRVOD lever: every merged PR adds a watchable, code-derived walkthrough to the archive. A new hire on day one can sit through the last quarter's significant PRs and absorb design decisions in roughly the time it would take to read the diff text — but with narration, file context, and the actual diff on screen.
+
+### Documentation drift
+
+Docs and code have separate lifecycles. Code ships every day; docs ship when someone remembers. The result is a known industry pattern: docs lag, devs notice, trust collapses, and the team operates on the assumption that the canonical source of truth is the code itself.
+
+PRVOD's framing inverts the maintenance burden: the walkthrough is **generated from the diff**, so the archive is structurally consistent with the code. There is no separate "update the docs" task — the walkthrough is regenerated per PR by definition.
+
+This does not eliminate all documentation. Architecture decision records, runbooks, and high-level system docs still need to exist. PRVOD replaces the layer where most drift happens — the "what did this PR actually do" layer.
+
+### Code-review throughput
+
+Code review is a context-switch tax. A reviewer arriving at an unfamiliar 400-line diff spends time orienting before they can evaluate. A 60-second walkthrough that surfaces the structure of the change loads context faster than text-only PR descriptions, and it does so without asking the author to write extra prose.
+
+If your team ships ≥10 PRs/week, the time saved at the reviewer side compounds. The hosted tier free trial lets you measure this without provisioning infra — pick a single repo, enable PRVOD for two weeks, and compare reviewer turnaround to your baseline.
+
+### ROI summary
+
+| Pain | Baseline cost | PRVOD's lever |
+| --- | --- | --- |
+| Onboarding ramp | 3–4 weeks, ~$15K productivity loss per hire (Full Scale) | Code-derived archive of every merged PR — watchable on day one |
+| Doc drift | Trust collapses; devs reverse-engineer from source | Walkthrough generated from the diff each time — drift impossible by construction |
+| Review fatigue | Reviewer context-switch tax per PR | 60–120s video loads structure before the line-by-line read |
+
+## For the developer champion
+
+Engineering leaders want the cost frame. The person defending the tool in a Slack thread needs the technical frame. Both rows are honest, but they live separately because mixing them is what makes a comparison feel like marketing.
+
+### Written PR descriptions
+
+What it is: free-form prose the author writes in the PR body.
+
+Where it wins: zero new dependencies, zero ramp.
+
+Where it fails:
+- Quality varies wildly by author.
+- It captures intent, not implementation. A PR description that says "refactored the auth middleware" tells you nothing about which functions moved.
+- It is frozen at write time. If the PR evolves during review, the description usually doesn't.
+
+PRVOD's edge: generated from the diff after every push. It describes what is actually in the code, not what the author meant when they opened the PR.
+
+### Manual Loom (or Tella, Vidyard, Veed) recordings
+
+What it is: the author screen-records themselves walking through the change.
+
+Where it wins: full author voice and context. The author can show their thinking, not just the code.
+
+Where it fails:
+- High per-PR effort. Most teams that try this drop it within a quarter.
+- Frozen at record time. If the PR changes after the recording, the Loom is wrong and nobody re-records.
+- Inconsistent coverage. Some PRs get recorded, most don't. The archive has holes.
+
+PRVOD's edge: zero authoring effort, every PR covered, regenerated on retry.
+
+### AI code review tools (CodeRabbit, Greptile, GitHub Copilot Code Review, Qodo Merge)
+
+What it is: an LLM reads the diff and posts inline comments.
+
+Where it wins: surfaces bugs and style issues line-by-line, integrates with the review UI.
+
+Where it fails:
+- Output is per-comment fragments, not a structured walkthrough. A reviewer still has to assemble the picture.
+- Optimized for "is this code correct?" not "what does this PR do as a whole?"
+- Text-only. Control-flow changes (renames across files, function moves, sequence-of-operations changes) are hard to communicate in inline comments.
+
+PRVOD's edge: complementary, not competitive. AI code review answers "are there bugs in this diff?"; PRVOD answers "what is this PR doing?" Teams often run both.
+
+### Static documentation sites (Mintlify, Docusaurus, GitBook, ReadMe)
+
+What it is: a curated documentation site, written by humans, deployed on every release.
+
+Where it wins: high-level architectural docs, public API references, tutorials.
+
+Where it fails:
+- High authoring cost. Every meaningful change needs a doc update.
+- Drift is the default. The half-life of a docs page is measured in weeks unless someone owns it.
+- Text format struggles with control flow, state transitions, and visual change.
+
+PRVOD's edge: PRVOD does not replace static docs. It replaces the "what did this PR do" layer that static docs almost never cover, because keeping that layer fresh is unsustainable in text.
+
+### Code-coupled docs (Swimm)
+
+What it is: documentation written alongside the code, with snippets anchored to specific lines. When the code moves, the anchors update; when the code semantically changes, the prose has to be revisited.
+
+Where it wins: anchors prevent the worst doc rot — a renamed function doesn't silently break the reference.
+
+Where it fails:
+- Prose still drifts. The anchor stays valid; the surrounding explanation may no longer match.
+- High authoring cost — same problem as static docs, mitigated but not eliminated.
+- Text format. Same limits as Mintlify-class tools on control-flow-heavy changes.
+
+PRVOD's edge: video format for control flow, and no separate authoring step. PRVOD and code-coupled docs are compatible — Swimm-style for stable concepts, PRVOD for the per-PR record.
+
+## Honest limitations of PRVOD
+
+A comparison page that doesn't list its own gaps reads as marketing. Real ones:
+
+- **LLM hallucination is non-zero.** The Self-Refine judge step catches most cases by re-evaluating coverage and narration quality, but cannot guarantee correctness. Critical PRs should still be reviewed by a human, not the walkthrough.
+- **Non-code PRs degrade.** Renames-only, lockfile-only, and config-only PRs produce thin walkthroughs because the diff doesn't carry the information.
+- **Cold pipeline cost.** First run on a new repo with a paid LLM costs the price of an LLM call plus TTS — typically a few cents per minute of video. Budget accordingly.
+- **English-only injection guard.** Prompt-injection patterns are detected in English. Non-English prompt injection passes through input sanitization (but the schema/canary defense layers still apply).
+- **No job queue (yet).** Production-scale users running >50 PRs/day should put PRVOD behind a real worker queue (BullMQ, Trigger.dev) rather than relying on the in-process fire-and-forget runner.
+
+## How to evaluate
+
+The honest evaluation path is short:
+
+1. Pick one repo where PRs are sized 200–800 lines.
+2. Run the [quick start](/quickstart/) against your last 5 merged PRs.
+3. Show the resulting videos to a reviewer who didn't write the code.
+4. Ask them: would you watch this before reading the diff?
+
+If the answer is yes on more than half the PRs, PRVOD is doing what it claims. If it's no, the walkthroughs are wrong for your domain — open an issue with one of the failing PRs and we will look at it.

@@ -1,0 +1,12 @@
+# Astro
+dist/
+.astro/
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
