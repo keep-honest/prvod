@@ -109,6 +109,107 @@ body {
   background: var(--sl-color-bg);
 }
 
+/* Collapsible sidebar toggle. Sits at the top of the sidebar; when collapsed
+   the sidebar slides out and the toggle parks against the left viewport edge
+   so users can bring the nav back. */
+.prvod-sidebar-toggle {
+  position: sticky;
+  top: 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  margin: 0.5rem 0 0.75rem auto;
+  padding: 0;
+  background: var(--prvod-bg-panel-strong);
+  color: var(--prvod-fg-muted);
+  border: 1px solid var(--prvod-border);
+  border-radius: 8px;
+  cursor: pointer;
+  z-index: 5;
+  transition:
+    color 120ms ease,
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.prvod-sidebar-toggle:hover,
+.prvod-sidebar-toggle:focus-visible {
+  color: var(--prvod-fg);
+  background: var(--prvod-bg-panel);
+  border-color: var(--prvod-border-strong);
+  outline: none;
+}
+
+/* Desktop collapsed state: hide the sidebar contents, keep the toggle visible
+   as a thin rail so it can be reopened. Sidebar grid column gets crushed via
+   inline-size override on the sidebar pane. */
+@media (min-width: 50rem) {
+  :root[data-sidebar-collapsed] #starlight__sidebar {
+    inline-size: 3rem;
+    min-inline-size: 3rem;
+    overflow: visible;
+  }
+
+  :root[data-sidebar-collapsed] .prvod-sidebar-inner {
+    display: none;
+  }
+
+  :root[data-sidebar-collapsed] .prvod-sidebar-toggle {
+    margin-inline: auto;
+  }
+}
+
+/* Widen splash pages so the hero video has room to breathe.
+   Scoped to [data-has-hero] so doc pages keep their reading column. */
+:root[data-has-hero] {
+  --sl-content-width: 72rem;
+}
+
+:root[data-has-hero] .main-frame .main-pane > .content-panel {
+  padding-inline: clamp(1rem, 3vw, 2.5rem);
+}
+
+/* Force the splash hero to stack: title/CTAs on top, full-width video below.
+   The default two-column layout caps the video at ~half the content width,
+   which keeps it small no matter how wide the page is. */
+:root[data-has-hero] .hero {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2.5rem;
+}
+
+:root[data-has-hero] .hero > .hero-html {
+  order: 2;
+  width: 100%;
+  max-width: 64rem;
+  margin-inline: auto;
+}
+
+:root[data-has-hero] .hero > :not(.hero-html) {
+  order: 1;
+  max-width: 60rem;
+}
+
+/* Splash hero video — full-fit, no crop, rounded to match brand surfaces */
+.prvod-hero-video {
+  width: 100%;
+  height: auto;
+  max-height: 55vh;
+  aspect-ratio: 16 / 9;
+  display: block;
+  object-fit: contain;
+  background: var(--prvod-bg);
+  border-radius: 16px;
+  border: 1px solid var(--prvod-border-strong);
+  box-shadow:
+    0 0 0 1px rgba(59, 109, 255, 0.18),
+    0 30px 70px rgba(0, 0, 0, 0.5),
+    0 0 80px rgba(59, 109, 255, 0.14);
+}
+
 /* Hero card used on the docs landing */
 .prvod-hero {
   display: grid;

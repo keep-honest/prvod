@@ -1,13 +1,23 @@
 ---
 title: PRVOD docs
 description: PRVOD is an open-source tool that generates video walkthroughs for pull requests and codebases — a living knowledge base where the code is the source of truth.
-template: splash
 hero:
   title: Watch any pull request explain itself
   tagline: PRVOD is an open-source tool that generates video walkthroughs for pull requests and codebases — a living knowledge base where the code is the source of truth.
   image:
-    file: ../../assets/hero-poster.png
-    alt: A real pull request, narrated end to end
+    html: |
+      <video
+        class="prvod-hero-video"
+        controls
+        preload="metadata"
+        playsinline
+        aria-label="A real pull request, narrated end to end"
+      >
+        <source
+          src="https://pub-50a4fe3c292447b5957b0a6af6fb2262.r2.dev/repo/videos/prvod_demo.MP4"
+          type="video/mp4"
+        />
+      </video>
   actions:
     - text: Generate your first walkthrough
       link: /quickstart/
