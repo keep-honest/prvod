@@ -42,6 +42,9 @@ services:
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       # Share-link signing for /watch/[jobId]
       SHARE_SIGNING_SECRET: ${SHARE_SIGNING_SECRET:-local-dev-share-secret}
+      # HMAC secret for local-storage signed URLs — container refuses to
+      # boot without this when USE_LOCAL_STORAGE=true (the default).
+      STORAGE_URL_SECRET: ${STORAGE_URL_SECRET:-local-dev-storage-secret-change-me}
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
