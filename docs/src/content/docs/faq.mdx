@@ -1,0 +1,116 @@
+---
+title: FAQ
+description: Privacy, cost, model swap-out, language support, and what PRVOD does badly.
+---
+
+## Does my code leave my infrastructure?
+
+It depends on which LLM and TTS providers you configure.
+
+- **Default configuration** sends the PR diff and metadata to Anthropic (Claude) for script generation and Google Cloud (TTS) for narration audio. The finished video is uploaded to whichever storage you point `STORAGE_PROVIDER` at (Cloudflare R2, AWS S3, or local filesystem).
+- **Local-only mode** (`SCRIPT_WRITER=mock TTS_PROVIDER=mock USE_LOCAL_STORAGE=true`) makes no outbound calls. The video that comes out is a deterministic stub, not a real walkthrough — useful for confirming the pipeline runs.
+- **Self-host with on-prem LLM**: replace `SCRIPT_WRITER` with a local CLI binding (e.g. `claude-cli` against a self-hosted endpoint, or your own implementation of `IScriptWriter`). The diff never leaves your network.
+
+If "no code leaves the perimeter" is a hard requirement today, self-host with on-prem LLM and TTS bindings — the diff stays inside your network. The hosted tier at [prvod.dev](https://prvod.dev) currently relies on third-party LLM and TTS providers; we are moving toward owning the full stack so the hosted tier can offer the same guarantees, but that work is in progress, not shipped. If you need full-perimeter privacy now, self-host; otherwise the hosted tier is the simpler path.
+
+## What does PRVOD cost?
+
+The **open-source project** is free under its license. You pay only for whatever providers you configure — typically:
+
+- LLM script generation: a few cents to ~$0.50 per walkthrough depending on diff size and model.
+- TTS (if using Google Cloud): a few cents per minute of audio.
+- Storage and egress: negligible at typical PR-review volume.
+
+The **hosted tier** at [prvod.dev](https://prvod.dev) bundles all of the above into per-month tiers. The free tier comes with 10 credits per month. See the pricing page for current numbers.
+
+## Which LLMs are supported?
+
+Script generation supports five real providers and a mock:
+
+| `SCRIPT_WRITER` | Provider |
+| --- | --- |
+| `claude-sdk` | Anthropic API |
+| `claude-cli` | Local `claude` CLI |
+| `gemini-sdk` | Google AI Studio |
+| `gemini-cli` | Local `gemini` CLI |
+| `codex-cli` | OpenAI Codex CLI |
+| `mock` | Deterministic test stub |
+
+Models are overridable via `CLAUDE_MODEL`, `GEMINI_MODEL`, `CODEX_MODEL`. The default Claude model is `claude-sonnet-4-20250514`; the default Gemini model is `gemini-2.5-pro`.
+
+To add a new provider, implement the `IScriptWriter` interface (`src/interfaces/IScriptWriter.ts`) and register it in `src/config/container.ts`. The full pipeline runs against the mock implementation in tests, so you can validate without API keys.
+
+## Which languages does the narration support?
+
+Narration generation works in any language the underlying LLM supports. The default prompts are English-tuned, so non-English output quality depends on prompt overrides.
+
+The **prompt-injection guard** is English-only — non-English prompt injection patterns will not be caught by the regex scanner, though the schema validation, canary token, and output validation layers still apply.
+
+TTS voice selection is overridable via `GOOGLE_TTS_VOICE`. Google Cloud TTS supports dozens of languages and voice families (Neural2, WaveNet, Studio, Chirp HD, Chirp3 HD).
+
+## What about programming languages?
+
+The syntax highlighting in scene clips uses [Shiki](https://shiki.style), which supports ~200 languages out of the box. PRVOD has no special-case logic per language — the diff parser is language-agnostic, the script writer reads any text-based diff, and the compositor renders whatever the highlighter produces.
+
+That said, the quality of the walkthrough depends on how well the LLM understands the language. Mainstream languages (TypeScript, Python, Go, Rust, Java, C#, Ruby) work well in practice. Niche or legacy languages may produce thinner narration.
+
+## How long does a walkthrough take to generate?
+
+A standard-mode walkthrough on a typical PR-sized diff takes **8–15 minutes** end-to-end with the default FFmpeg compositor. The LLM stages dominate: script generation, the optional Self-Refine judge pass, and any per-scene LLM calls together account for most of the wall-clock time. TTS synthesis, scene compositing, and the final FFmpeg compose are comparatively quick.
+
+Popcorn mode produces a ~5-minute video and takes proportionally longer than standard — the script writer plans more scenes and the judge has more material to evaluate. Remotion (`VIDEO_COMPOSITOR=remotion`) adds a one-time 20–40s cold start for the webpack bundle on first render.
+
+If you want to cut generation time, the highest-impact knobs are `SKIP_JUDGE=true` (bypasses the Self-Refine pass) and using a smaller model via `CLAUDE_MODEL` / `GEMINI_MODEL`. Both trade off quality for speed; measure on your own diffs before adopting in production.
+
+## What does PRVOD do badly?
+
+The honest list (also covered on the [compare page](/compare/) and in the [main README's Known Limitations section](https://github.com/keep-honest/prvod#known-limitations)):
+
+- **Renames-only or lockfile-only PRs.** The walkthrough has nothing to describe.
+- **Very large diffs** (>5MB unified diff). The API caps at 5MB; bigger PRs get rejected. In practice this is a long way past where a human-watchable walkthrough makes sense.
+- **PRs with no description and no linked issue.** The script has less context, and the narration tends toward "this function was changed" rather than "this change is part of X".
+- **Non-English prompt-injection patterns** bypass the regex scanner. Other defense layers still apply.
+- **In-process job runner.** Fire-and-forget promise in the Next.js process; not appropriate for production at scale without a real queue.
+
+## Self-host or hosted?
+
+**Self-host when:**
+- You need code to stay inside your network perimeter.
+- You want full control of the model swap-out, prompt prefixes, and storage backend.
+- You are running PRVOD for a single org and don't need multi-tenant support.
+
+**Use hosted when:**
+- You want it to work in an afternoon without provisioning Postgres, R2, and a GitHub App.
+- You are evaluating PRVOD and want the smallest commitment.
+- You don't want to maintain the LLM + TTS provider plumbing yourself.
+- You want the hosted-only capabilities built on top of the open core (see below).
+
+### What's hosted-only
+
+The pipeline is identical; what hosted adds is the surface around it.
+
+- **User management.** Orgs, roles, per-repo access, audit log. The OSS has a single admin key; hosted has real multi-user controls.
+- **Two-way PR review surface.** Watch the walkthrough with the diff inline, leave comments anchored to specific scenes or diff hunks, and have those comments post back to the GitHub PR as inline review comments. The walkthrough becomes a review surface, not just a video.
+- **Walkthrough library.** Every walkthrough your org has ever generated lives in one searchable place — indexed by repo, PR number, author, and topic. New hires get an archive to watch on day one instead of a list of PR links to chase.
+- **Ongoing feature work.** New capabilities that complement the core (the two surfaces above, plus future features) ship to hosted first and may take time to land in the OSS.
+
+Both run the same pipeline. The hosted tier is the same code plus the surface layer above, deployed and operated. Choose whichever fits your privacy, cost, and ops budget.
+
+## How do I install and use the CLI?
+
+`prvodctl` is the CLI. Self-contained Go binary, distributed via GitHub Releases.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keep-honest/prvod/main/cli-go/install.sh | sh
+prvodctl --version
+```
+
+The install script auto-detects OS/arch and verifies the SHA256 against the release's `SHA256SUMS`. Windows: grab the `.zip` from the [releases page](https://github.com/keep-honest/prvod/releases/latest). Drop a `prvodctl.yaml` (in `./`, `$XDG_CONFIG_HOME/prvodctl/`, or `~/.prvodctl.yaml`) with `server-url:` and `api-key:` keys so you don't repeat them on every call. Full reference at [`cli-go/README.md`](https://github.com/keep-honest/prvod/blob/main/cli-go/README.md).
+
+Diffs upload via the streaming branch (`application/x-git-diff`, 100 MB cap) by default. Pass `--no-stream-diff` only when you need the real `--pr-number` preserved in job metadata — the streaming branch synthesises `prNumber=1` server-side. Exit codes: 0 success, 1 generic / job failed / poll timeout / generic flag conflict (e.g. `--popcorn` with `--short-dur`), 2 diff-source flag conflict (`--diff-file` or `--stream-diff` combined with a mutually-exclusive flag, or `--pr-number` in streaming mode without `--no-stream-diff`), 3–4 diff-file issues, 5 `DIFF_TOO_LARGE`, 6 `DIFF_PARSE_ERROR`, 7 `DIFF_FETCH_TIMEOUT`.
+
+(An in-repo Node CLI also exists at `src/cli/local-test.ts` — invoke with `npm run cli -- <flags>`. Same flag surface as `prvodctl`. Useful while developing the CLI itself; otherwise stick with `prvodctl`.)
+
+## How do I contribute?
+
+The contributor guide lives at [CONTRIBUTING.md](https://github.com/keep-honest/prvod/blob/main/CONTRIBUTING.md) in the main repo. Bugs and feature requests go in [GitHub issues](https://github.com/keep-honest/prvod/issues).

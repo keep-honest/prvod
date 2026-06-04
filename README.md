@@ -1,79 +1,147 @@
 # PRVOD
 
-**Watch any pull request explain itself.**
+**PRVOD is an open-source tool that generates video walkthroughs for pull requests and codebases — a living knowledge base where the code is the source of truth.**
 
-> **Want walkthroughs on every PR without running the infra?** Get a hosted version at [prvod.dev](https://prvod.dev). The free tier comes with 10 credits a month; paid plans add hosting, team controls, support, and features that build on the open-source core - including capabilities your product manager will keep asking about. [Subscribe →](https://prvod.dev)
+[![PRVOD demo — a real pull request, narrated end to end](.github/assets/prvod-demo-poster.png)](https://pub-50a4fe3c292447b5957b0a6af6fb2262.r2.dev/repo/videos/prvod_demo.MP4)
 
-Reading a 40-file diff is slow. Pinging the author for context is friction. A PRVOD walkthrough - a narrated video of the change, generated from the diff itself - explains the whole thing end-to-end. Reviewers get up to speed in minutes instead of an afternoon. New contributors onboard to a change without scheduling a 1:1. Stakeholders who don't live in GitHub finally see what actually shipped, and can share the link with anyone else who needs to know.
+_Click to play — a real PR turned into a narrated walkthrough video, end to end._
 
-The videos don't disappear when the PR closes. Each one lives at its own review page (`/reviews/[jobId]`) and share player (`/watch/[jobId]`). PR by PR, your project accumulates an accurate, code-driven knowledge base of how it got to where it is - built from the diffs themselves, so it can't drift the way written docs do. Months later, when someone asks "how/why was this implemented?", the answer is a link.
+[**Quick start →**](https://docs.prvod.dev/quickstart/) · [**Docs**](https://docs.prvod.dev) · [**Compare**](https://docs.prvod.dev/compare/) · [**Hosted tier**](https://prvod.dev)
 
-Pick the mode that fits the PR:
-
-- **Standard** - ~20–120 seconds, scaled to diff size
-- **`@prvod short`** - ~20–60 second focused walkthrough
-- **`@prvod popcorn`** - ~5-minute deep tour through every changed file (240–320s), built for the PRs you'd otherwise need a meeting to explain
-- **`@prvod deepdive`** - reviewer-style narration, combinable with any of the above
-
-The production trigger is the GitHub App webhook: write `@prvod` (or any mode variant) in a PR description or comment, and the bot posts the finished walkthrough back as a comment when it's done.
-
-[![PRVOD demo - a real pull request, narrated end to end](.github/assets/prvod-demo-poster.png)](https://pub-50a4fe3c292447b5957b0a6af6fb2262.r2.dev/repo/videos/prvod_demo.MP4)
-
-_Click to play - a real PR turned into a narrated walkthrough video, end to end._
-
-## Table of Contents
-
-- [What It Produces](#what-it-produces)
-- [How It Works](#how-it-works)
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [CLI](#cli)
-- [API](#api)
-- [Providers](#providers)
-- [Configuration](#configuration)
-- [GitHub App Webhook](#github-app-webhook)
-- [Testing](#testing)
-- [Security](#security)
-- [Known Limitations](#known-limitations)
-- [Project Structure](#project-structure)
-- [One-Time Trial Keys](#one-time-trial-keys)
+> **Don't want to run the infra?** The hosted tier at [prvod.dev](https://prvod.dev) runs the same pipeline. Free tier: 10 credits/month. Paid tiers add:
+>
+> - **User management** — orgs, roles, per-repo access, audit log.
+> - **Two-way PR review surface** — view the diff in the player, comment on specific scenes or hunks, and have the comments post back to the GitHub PR as inline review comments.
+> - **Walkthrough library** — every walkthrough your org has ever generated lives in one searchable place, indexed by repo, PR, and topic. New hires get an actual archive to watch on day one.
+> - **Ongoing feature work** — capabilities built on top of the open core (e.g. the two items above) ship to hosted first.
+>
+> No sales call required.
 
 ---
 
-## What It Produces
+## 30-second quick start
 
-A short narrated video that walks through the change end-to-end - showing the relevant code as the narration explains what each part does and why. It comes with synchronized captions and lives at a review page you can share with anyone who needs to see what shipped. The whole thing is generated from the diff itself, automatically, with no human in the loop.
+Prerequisites: Docker (for Postgres), Node.js 22+, FFmpeg on `PATH`, and either an `ANTHROPIC_API_KEY` or an authenticated `claude` CLI on your host.
 
-Deepdive mode swaps the neutral narration for reviewer-style commentary that asks the kinds of questions an actual reviewer would.
+The dev path runs the Next.js server on your host (`next dev` → `NODE_ENV=development`), which keeps `/api/jobs` enabled for the CLI. The `docker compose up app` image is the production-shape build intended for GitHub-App-webhook testing — `/api/jobs` is 404'd there by design, see [GitHub App Webhook](#github-app-webhook).
+
+```bash
+git clone https://github.com/keep-honest/prvod.git && cd prvod
+
+# 1. Host deps
+npm ci
+
+# 2. Install prvodctl (the CLI you'll use against the server)
+curl -fsSL https://raw.githubusercontent.com/keep-honest/prvod/main/cli-go/install.sh | sh
+
+# 3. Postgres in Docker — host port 5434 → container 5432
+docker compose up db -d
+DATABASE_URL=postgresql://dev:dev@localhost:5434/pr_to_video npm run db:push
+
+# 4. Local-dev env: built-in TTS, local storage, your Anthropic key.
+#    Pre-generate the two secrets out of the shell history, then paste
+#    them into .env yourself (the quoted heredoc below keeps $(...) literal
+#    so nothing expands inside ~/.zsh_history / ~/.bash_history).
+cp .env.example .env
+openssl rand -hex 32   # copy this → STORAGE_URL_SECRET below
+openssl rand -hex 32   # copy this → APP_ENCRYPTION_KEY below
+cat >> .env <<'EOF'
+DATABASE_URL=postgresql://dev:dev@localhost:5434/pr_to_video
+ANTHROPIC_API_KEY=sk-ant-...
+USE_BUILTIN_TTS=true
+STORAGE_PROVIDER=local
+STORAGE_URL_SECRET=<paste first openssl output>
+APP_ENCRYPTION_KEY=<paste second openssl output>
+API_SECRET_KEY=local-dev-key
+EOF
+
+# 5. Start the dev server
+npm run dev
+
+# 6. In another terminal: walk through your current branch
+prvodctl --server-url http://localhost:3000 --api-key local-dev-key --uncommitted
+```
+
+`prvodctl` prints a `http://localhost:3000/reviews/<jobId>` URL when the pipeline finishes — typically 8–15 minutes for a standard-mode walkthrough on a PR-sized diff. Open it to watch the walkthrough.
+
+(An in-repo Node CLI exists too at `src/cli/local-test.ts` — `npm run cli -- <flags>` — with the same flag surface. `prvodctl` is the primary tool from here on.)
+
+For the production path (GitHub App, `@prvod` annotation, hosted storage), see [docs.prvod.dev/quickstart](https://docs.prvod.dev/quickstart/).
 
 ---
 
-## How It Works
+## What you get
+
+| Mode | Duration | Trigger | What it's for |
+|---|---|---|---|
+| **Standard** | 20–120s, scaled to diff size | `@prvod` or default CLI | Default walkthrough on most PRs |
+| **Short** | 20–60s | `@prvod short` or `--short-dur` | Bug fixes, single-file changes, share-in-Slack PRs |
+| **Popcorn** | 240–320s, three-act story arc | `@prvod popcorn` or `--popcorn` | Large PRs you would otherwise need a meeting to explain |
+| **Deepdive** | Same as base mode | Add `deepdive` to any mode | Reviewer-style narration that surfaces concerns, not just summary |
+| **Script-only** | No video | `@prvod script` or `--script-only` | LLM script JSON without TTS or composition — useful for testing |
+
+Each finished walkthrough lives at two permanent URLs: `/reviews/[jobId]` (review page with scene jumps) and `/watch/[jobId]` (HMAC-signed share player). PR by PR, your project accumulates a code-derived archive of how it got to its current state — built from the diffs themselves, so it can't drift the way written docs do.
+
+---
+
+## Why this exists
+
+Three pains motivate the project. Each is non-zero, each compounds.
+
+**Documentation drift.** Docs and code have separate lifecycles. Code ships every day; docs ship when someone remembers. Once a team learns the docs are unreliable, they stop trusting them and reverse-engineer from source — which is slower than reading accurate docs would have been. PRVOD generates the walkthrough from the diff itself; the archive is structurally aligned with the code because there is no separate authoring step to fall behind.
+
+**Onboarding ramp.** Industry baseline for "time to productive" is 3–4 weeks. Full Scale puts the associated productivity-loss cost at roughly $15,000 per hire. The numbers vary, but the order of magnitude is consistent across the engineering-management literature. A new hire on day one can sit through the last quarter's significant PRs as walkthroughs and absorb design decisions in roughly the time it would take to read the diff text — but with narration, file context, and the actual diff on screen.
+
+**Code-review fatigue.** A reviewer arriving at an unfamiliar 400-line diff spends time orienting before they can evaluate. A 60-second walkthrough loads the structure of the change faster than the line-by-line read, and it costs the author zero extra effort (the annotation is the trigger).
+
+The full ROI write-up — with the engineering-leader framing kept separate from the developer-champion framing — lives at [docs.prvod.dev/compare](https://docs.prvod.dev/compare/).
+
+---
+
+## How PRVOD compares
+
+| Dimension | PRVOD | Written PR description | Manual Loom | AI code review (CodeRabbit-class) | Static docs (Mintlify-class) | Code-coupled docs (Swimm-class) |
+|---|---|---|---|---|---|---|
+| Source of truth | Diff + code | Author intent | Author's screen at record time | Diff | Author-written prose | Code-anchored text |
+| Drift resistance | Regenerated per PR | Frozen at write time | Frozen at record time | Per PR | Decays with every commit | Anchor holds; prose drifts |
+| Authoring effort | Zero — one annotation | High — every PR | Medium — every PR | Zero | High — every change | Medium — every change |
+| Output format | Narrated video + captions | Text | Video | Text comments inline | Text site | Text + code anchors |
+| Onboarding fit | Watch real PR history | Read backlog of PR text | If someone recorded it | None | Read curated docs | Read curated docs |
+| PR-review context | Per PR, automatic | Per PR, manual | Per PR, manual | Per PR, automatic | None | None |
+| Cost model | OSS / hosted tier | Free / engineer time | Loom subscription + time | Per-seat SaaS | Per-seat SaaS + author time | Per-seat SaaS + author time |
+
+Full comparison, including the honest list of where PRVOD is the wrong tool, is at [docs.prvod.dev/compare](https://docs.prvod.dev/compare/).
+
+PRVOD does not replace AI code review (CodeRabbit, Greptile, Copilot Code Review) — they answer "are there bugs in this diff?" PRVOD answers "what is this PR doing?" Teams often run both.
+
+---
+
+## How it works
 
 ```
 PR diff + metadata
      │
      ▼
- 1. Parse diff          - score files by importance, classify change type
- 2. Write script (LLM)  - 4–16 scenes via Claude or Gemini, validated by Zod
- 2b. Judge script       - LLM evaluates coverage and narration quality, revises
-                          failing parts (optional, graceful degradation)
- 3. Synthesize speech   - Google TTS or model-native voice generates per-scene audio
- 4. Build scene clips   - syntax-highlighted code from the diff, sized to each
-                          scene's narration
- 5. Compose final video - FFmpeg (default) or Remotion renders clips + captions at 1080p/30fps
- 6. Upload & deliver    - signed URL returned to the caller
+ 1. Parse diff          score files by importance, classify change type
+ 2. Write script (LLM)  4–16 scenes via Claude or Gemini, validated by Zod
+ 2b. Judge script       LLM evaluates coverage and narration quality, revises
+                        failing parts (optional, graceful degradation)
+ 3. Synthesize speech   Google TTS or model-native voice generates per-scene audio
+ 4. Build scene clips   syntax-highlighted code from the diff, sized to each
+                        scene's narration
+ 5. Compose final video FFmpeg (default) or Remotion renders clips + captions at 1080p/30fps
+ 6. Upload & deliver    signed URL returned to the caller
 ```
 
-The judges in step 2b use the [Self-Refine](https://arxiv.org/abs/2303.17651) pattern: an LLM evaluates the script against coverage criteria (does it adequately cover the diff?) and narration quality criteria (is it clear and coherent?), then revises failing parts in a follow-up pass.
+The judge step uses the [Self-Refine](https://arxiv.org/abs/2303.17651) pattern: an LLM evaluates the script against coverage and narration-quality criteria, then revises failing parts in a follow-up pass. Checkpoints are written after expensive steps; retry resumes from the latest checkpoint instead of rerunning the entire pipeline.
 
-Checkpoints are saved after script generation. Retry resumes from the latest checkpoint instead of rerunning the entire pipeline.
+Stage-by-stage detail at [docs.prvod.dev/concepts](https://docs.prvod.dev/concepts/).
 
 ---
 
 ## Architecture
 
-The codebase follows a 4-layer dependency inversion pattern. Dependencies point inward only - Layer 2 never imports Layer 3, Layer 3 never imports Layer 4.
+The codebase follows a 4-layer dependency inversion pattern. Dependencies point inward only — Layer 2 never imports Layer 3, Layer 3 never imports Layer 4.
 
 ```
 Layer 1: src/interfaces/          Port definitions (IScriptWriter, ITTSService, IVideoCompositor, ...)
@@ -82,7 +150,7 @@ Layer 3: src/infrastructure/      Implementations (Postgres, R2, Google TTS, FFm
 Layer 4: src/app/api/             Next.js route handlers, CLI entrypoints
 ```
 
-**DI container** (`src/config/container.ts`): Lazy singleton, environment-driven wiring. Setting `NODE_ENV=test` or `USE_MOCK_SERVICES=true` swaps every binding for an in-memory mock - the full pipeline runs without a database, LLM, or storage backend.
+**DI container** (`src/config/container.ts`): Lazy singleton, environment-driven wiring. Setting `NODE_ENV=test` or `USE_MOCK_SERVICES=true` swaps every binding for an in-memory mock — the full pipeline runs without a database, LLM, or storage backend.
 
 **Job processing**: HTTP handlers return a job ID immediately, `PipelineRunner` runs async. Callers poll for completion. One active job per (installation, repo, PR) is enforced atomically at the DB layer.
 
@@ -92,107 +160,81 @@ Layer 4: src/app/api/             Next.js route handlers, CLI entrypoints
 
 ---
 
-## Quick Start
-
-**Prerequisites:** Node.js 22+, PostgreSQL 16+, FFmpeg on PATH.
-
-<details>
-<summary><b>Docker Compose</b> - everything in containers, minimal setup</summary>
-
-```bash
-cd pr-to-video
-
-# 1. Start Postgres (host port 5433 → container 5432)
-docker compose up db -d
-
-# 2. Apply the schema
-DATABASE_URL=postgresql://dev:dev@localhost:5433/pr_to_video npm run db:push
-
-# 3. Start the app (uses Dockerfile.local - bundles Claude CLI + FFmpeg)
-docker compose up app
-# → http://localhost:3000
-```
-
-`docker-compose.yml` ships sensible defaults: `SCRIPT_WRITER=claude-cli` (mounts your host `~/.claude` for auth), `USE_BUILTIN_TTS=true` (no Google Cloud key needed), and `USE_LOCAL_STORAGE=true` (outputs at `./output/` on the host). Override any of these by exporting the env var before `docker compose up app`.
-
-</details>
-
-<details>
-<summary><b>Bare metal</b> - run directly with Node.js</summary>
-
-```bash
-# Install FFmpeg
-brew install ffmpeg          # macOS
-sudo apt install ffmpeg      # Debian/Ubuntu
-
-cd pr-to-video
-npm ci
-npm run build
-
-# Set up database
-DATABASE_URL=<your-postgres-url> npm run db:push
-
-# Configure
-cp .env.example .env
-# Edit .env with your provider keys
-
-# Start
-npm run start
-# → http://localhost:3000
-```
-
-</details>
-
-<details>
-<summary><b>Script only</b> - no video generation, no TTS</summary>
-
-Generates the JSON script (scene structure, narration, code highlights) without producing a video. Useful for testing the LLM pipeline or feeding into a custom renderer.
-
-```bash
-npm run cli -- \
-  --server-url http://localhost:3000 \
-  --api-key your-secret \
-  --script-only
-```
-
-</details>
-
----
-
 ## CLI
 
-The CLI reads your local git diff, posts it to the server, and polls until the job finishes.
+`prvodctl` is the CLI. It reads your local git diff, posts it to the server, and polls until the job finishes. Self-contained Go binary, distributed via GitHub Releases. Full reference at [`cli-go/README.md`](cli-go/README.md).
+
+(There is also a Node CLI in this repo at `src/cli/local-test.ts` — `npm run cli -- <flags>` — kept for development against an in-tree server. Same flag surface as `prvodctl`. If you're not actively hacking on `src/cli/`, prefer `prvodctl`.)
+
+### Install
 
 ```bash
-# Full video from the last commit
-npm run cli -- --server-url http://localhost:3000 --api-key <key>
+# Latest release (auto-detects OS/arch, verifies SHA256)
+curl -fsSL https://raw.githubusercontent.com/keep-honest/prvod/main/cli-go/install.sh | sh
 
-# Script only (skip video generation)
-npm run cli -- --server-url http://localhost:3000 --api-key <key> --script-only
+# Pin a specific release
+curl -fsSL https://raw.githubusercontent.com/keep-honest/prvod/main/cli-go/install.sh | PRVODCTL_VERSION=v0.1.0 sh
 
-# Short video (20–60 seconds instead of full-length)
-npm run cli -- --server-url http://localhost:3000 --api-key <key> --short-dur
-
-# Popcorn mode (~5 minutes, extended-depth mini documentary)
-npm run cli -- --server-url http://localhost:3000 --api-key <key> --popcorn
-
-# Reviewer-style deepdive walkthrough
-npm run cli -- --server-url http://localhost:3000 --api-key <key> --deepdive
-
-# Reviewer-style script-only deepdive
-npm run cli -- --server-url http://localhost:3000 --api-key <key> --script-only --deepdive
-
-# TTS only (generate script + synthesize audio, skip video)
-npm run cli -- --server-url http://localhost:3000 --api-key <key> --tts-only
-
-# Use uncommitted changes instead of HEAD~1..HEAD
-npm run cli -- --server-url http://localhost:3000 --api-key <key> --uncommitted
-
-# Retry a previously failed job
-npm run cli -- --server-url http://localhost:3000 --api-key <key> --retry-job <uuid>
+# Verify
+prvodctl --version
 ```
 
-Set `SERVER_URL` and `API_SECRET_KEY` as environment variables to skip repeating the flags.
+Windows: download the `.zip` from the [releases page](https://github.com/keep-honest/prvod/releases/latest) and put `prvodctl.exe` on `PATH`.
+
+### Usage
+
+```bash
+# Full video from the last commit (streams the diff by default, 100 MB cap)
+prvodctl --server-url http://localhost:3000 --api-key <key>
+
+# Script only (skip video generation)
+prvodctl --script-only
+
+# Short video (20–60 seconds instead of full-length)
+prvodctl --short-dur
+
+# Popcorn mode (~5 minutes, extended-depth mini documentary)
+prvodctl --popcorn
+
+# Reviewer-style deepdive narration (combinable with --short-dur, --popcorn, --script-only)
+prvodctl --deepdive
+
+# TTS only (generate script + synthesize audio, skip video)
+prvodctl --tts-only
+
+# Use uncommitted changes instead of HEAD~1..HEAD
+prvodctl --uncommitted
+
+# Stream a saved diff file (also uses the 100 MB streaming branch)
+prvodctl --diff-file changes.patch
+
+# Opt out of streaming — uses the legacy JSON branch (5 MB cap, preserves real --pr-number)
+prvodctl --no-stream-diff --pr-number 42
+
+# Retry a previously failed job
+prvodctl --retry-job <uuid>
+```
+
+Set `SERVER_URL` and `API_SECRET_KEY` in your shell, or drop a `prvodctl.yaml` next to the binary (`./`, `$XDG_CONFIG_HOME/prvodctl/`, or `~/.prvodctl.yaml`), to skip repeating the flags.
+
+### Diff upload: streaming is the default
+
+`prvodctl` uploads via `application/x-git-diff` streaming (100 MB cap) by default — equivalent to passing `--stream-diff`. Diffs larger than 5 MB no longer hit `DIFF_TOO_LARGE`. The streaming branch synthesises `repoFullName` / `prNumber=1` server-side; if you need the real PR number in the job metadata, add `--no-stream-diff` to route through the legacy JSON branch.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Generic error / job failed / poll timeout / generic flag conflict (e.g. `--popcorn` with `--short-dur`) |
+| 2 | Diff-source flag conflict: `--diff-file` or `--stream-diff` combined with a mutually-exclusive flag (`--pr-number`, `--title`, `--uncommitted`, `--retry-job`, or each other); also `--pr-number` in streaming mode (the default) without `--no-stream-diff` |
+| 3 | `--diff-file` missing or empty |
+| 4 | `--diff-file` is not a unified diff (must start with `diff --git`) |
+| 5 | Server `DIFF_TOO_LARGE` |
+| 6 | Server `DIFF_PARSE_ERROR` |
+| 7 | Server `DIFF_FETCH_TIMEOUT` |
+
+5/6/7 fire on both create-time and poll-time failures so CI tooling sees a consistent exit code regardless of where in the pipeline the failure happens. Friendly user-facing messages are surfaced for `LLM_RATE_LIMITED_EXHAUSTED`, `DIFF_TOO_LARGE`, `DIFF_PARSE_ERROR`, and `DIFF_FETCH_TIMEOUT` instead of the raw server `errorMessage`.
 
 ---
 
@@ -204,7 +246,7 @@ All endpoints require `Authorization: Bearer <api-key>` (a DB-backed key from `s
 
 ### `POST /api/jobs`
 
-Create a video generation job. Returns immediately; poll `GET /api/jobs/:id` for status. Idempotent - if an active job exists for the same repo + PR number, it returns the existing job.
+Create a video generation job. Returns immediately; poll `GET /api/jobs/:id` for status. Idempotent — if an active job exists for the same repo + PR number, it returns the existing job.
 
 **Rate limit:** 50 jobs per repo per 24 hours.
 
@@ -258,7 +300,7 @@ Poll job status by UUID. Completed jobs always return a freshly signed URL.
 
 ### Review Pages
 
-Completed video jobs can be viewed at `/reviews/:jobId`, a server-rendered page that plays the walkthrough video and lists the scenes with jump-to-timestamp links. The page is open-access - no authentication. For a public share player at `/watch/[jobId]`, links are HMAC-signed with `SHARE_SIGNING_SECRET` so tampered or expired links return a generic "Link Expired" page.
+Completed video jobs can be viewed at `/reviews/:jobId`, a server-rendered page that plays the walkthrough video and lists the scenes with jump-to-timestamp links. The page is open-access — no authentication. For a public share player at `/watch/[jobId]`, links are HMAC-signed with `SHARE_SIGNING_SECRET` so tampered or expired links return a generic "Link Expired" page.
 
 ### `POST /api/jobs/:id/retry`
 
@@ -272,14 +314,14 @@ Create single-use API keys for potential clients to try the service once. The ke
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/admin/keys/one-time` | Create a one-time key. Pass optional `{"label": "..."}`. Returns the full key once - store it securely. |
+| `POST /api/admin/keys/one-time` | Create a one-time key. Pass optional `{"label": "..."}`. Returns the full key once — store it securely. |
 | `GET /api/admin/keys/one-time` | List all one-time keys with status, usage count, and timestamps. |
-| `DELETE /api/admin/keys/one-time/:keyId` | Revoke a key. Idempotent - revoking consumed keys succeeds silently. |
+| `DELETE /api/admin/keys/one-time/:keyId` | Revoke a key. Idempotent — revoking consumed keys succeeds silently. |
 
 **Trial user flow:**
 
 1. Admin creates a key and shares it with the trial user
-2. Trial user calls `POST /api/jobs` with `Authorization: Bearer <one-time-key>` - same as a regular key
+2. Trial user calls `POST /api/jobs` with `Authorization: Bearer <one-time-key>` — same as a regular key
 3. Trial user polls `GET /api/jobs/:id` until the video is ready (works even after the key is consumed)
 4. After one successful full video generation, the key is permanently consumed
 
@@ -294,6 +336,8 @@ Create single-use API keys for potential clients to try the service once. The ke
 | 429 | `KEY_IN_USE` | A job is already running with this key |
 
 See [specs/001-one-time-api-key/contracts/admin-one-time-keys.md](specs/001-one-time-api-key/contracts/admin-one-time-keys.md) for full API contract details.
+
+---
 
 ## Providers
 
@@ -415,7 +459,7 @@ Required when using the [GitHub App webhook trigger](#github-app-webhook). Comme
 
 | Variable | Required | Description |
 |---|---|---|
-| `GITHUB_APP_ID` | Yes | Numeric App ID - found on your app's settings page under "App ID". |
+| `GITHUB_APP_ID` | Yes | Numeric App ID — found on your app's settings page under "App ID". |
 | `GITHUB_APP_PRIVATE_KEY` | Yes | RSA private key PEM with literal `\n` between lines. Generate: `openssl genrsa 2048 | tr '\n' '\\n'`. |
 | `GITHUB_APP_SLUG` | Yes | Your app's slug (e.g. `prvod`). Prevents the bot from triggering itself in comment loops. |
 | `GITHUB_APP_WEBHOOK_SECRET` | Yes | Secret used to validate `X-Hub-Signature-256` on App webhooks. Generate: `openssl rand -hex 32`. |
@@ -435,7 +479,6 @@ Only needed if you use the local/debug `/api/jobs` endpoints outside production.
 
 </details>
 
-
 <details>
 <summary><b>Feature Flags</b></summary>
 
@@ -449,7 +492,7 @@ Only needed if you use the local/debug `/api/jobs` endpoints outside production.
 | `POST_GROUNDING` | `false` | Re-run narration judge after a successful grounding repair to restore narrative quality. Adds 1-3 extra LLM calls when grounding repair fires. |
 | `REVIEWER_VIOLATION_WARN` | `false` | Treat deepdive reviewer narration validation failures (verdict language, client-facing tone) as warnings instead of fatal errors. Ignored in standard mode. |
 | `SKIP_JUDGE` | `false` | Bypass all AI judges (V2 coverage judge, V2 narration quality judge). Deterministic validators still run. Useful for local iteration and cost-sensitive environments. |
-| `LLM_MAX_RETRIES` | `5` | Max retry attempts per LLM call on transient errors (429, `RESOURCE_EXHAUSTED`, overload, 5xx, network). Each call - not the pipeline - is retried with exponential backoff. When exhausted, the pipeline fails with `LLM_RATE_LIMITED_EXHAUSTED` and posts a dedicated PR comment. Set to `1` to disable. |
+| `LLM_MAX_RETRIES` | `5` | Max retry attempts per LLM call on transient errors (429, `RESOURCE_EXHAUSTED`, overload, 5xx, network). Each call — not the pipeline — is retried with exponential backoff. When exhausted, the pipeline fails with `LLM_RATE_LIMITED_EXHAUSTED` and posts a dedicated PR comment. Set to `1` to disable. |
 | `LLM_RETRY_BASE_DELAY_MS` | `1000` | Base delay (ms) for the first backoff between LLM retries. Each subsequent attempt doubles, capped at 30s, with jitter. |
 | `CLAUDE_SUMMARISER_MODEL` | `claude-haiku-4-5-20251001` | Anthropic model used by the oversized-file rolling summariser. Change to a larger model for higher-fidelity summaries of large files at higher token cost. |
 | `CLI_GIT_MAX_BUFFER_MB` | `64` | Max buffer (MB) for `git diff` commands in the local CLI (`--uncommitted`, `--diff-file`). Increase if your monorepo generates diffs larger than 64 MB. |
@@ -460,7 +503,7 @@ Only needed if you use the local/debug `/api/jobs` endpoints outside production.
 
 ## GitHub App Webhook
 
-The supported production trigger: install a GitHub App on your organization or repositories. Comments are posted by `your-app[bot]` - a clean bot identity rather than a personal account. A single server handles all your repositories as one multi-tenant installation.
+The supported production trigger: install a GitHub App on your organization or repositories. Comments are posted by `your-app[bot]` — a clean bot identity rather than a personal account. A single server handles all your repositories as one multi-tenant installation.
 
 ### How it works
 
@@ -468,7 +511,7 @@ The supported production trigger: install a GitHub App on your organization or r
 2. GitHub delivers a webhook event to your server
 3. The server verifies the `X-Hub-Signature-256` header
 4. It exchanges a JWT for an installation-scoped token and fetches the PR diff + metadata
-5. It creates a video job and immediately posts an acknowledgement comment on the PR (e.g. "Generating a video walkthrough of this PR - hang tight, it'll be ready in a few minutes")
+5. It creates a video job and immediately posts an acknowledgement comment on the PR (e.g. "Generating a video walkthrough of this PR — hang tight, it'll be ready in a few minutes")
 6. The pipeline runs in the background (fire-and-forget)
 7. When the video is ready, it posts a second comment as `prvod[bot]` with the signed URL
 
@@ -477,7 +520,7 @@ The supported production trigger: install a GitHub App on your organization or r
 1. Go to **github.com/settings/apps/new** (personal account) or **github.com/organizations/YOUR-ORG/settings/apps/new** (organization app).
 
 2. Fill in the registration form:
-   - **App name**: `prvod` (or any name - your users will see `<name>[bot]`)
+   - **App name**: `prvod` (or any name — your users will see `<name>[bot]`)
    - **Homepage URL**: your server URL (required but not used)
    - **Webhook URL**: `https://your-server.com/api/webhook/github`
    - **Webhook secret**: generate with `openssl rand -hex 32` and paste here
@@ -496,7 +539,7 @@ The supported production trigger: install a GitHub App on your organization or r
 4. On the app settings page:
    - Note the **App ID** (a number like `1234567`)
    - Note the **App slug** (shown in the URL: `github.com/apps/<slug>`)
-   - Under _Private keys_, click **Generate a private key** - a `.pem` file downloads
+   - Under _Private keys_, click **Generate a private key** — a `.pem` file downloads
    - Convert the PEM for use as an env var (no literal newlines):
      ```bash
      cat your-app.pem | tr '\n' '\\n'
@@ -551,9 +594,9 @@ The server receives an `installation.created` webhook and records the installati
 
 | Comment or PR description | What happens |
 |---|---|
-| `@prvod` | Full video generated (20–120s). Standard narration mode. Once per PR - subsequent annotations on the same PR are ignored. |
+| `@prvod` | Full video generated (20–120s). Standard narration mode. Once per PR — subsequent annotations on the same PR are ignored. |
 | `@prvod short` | Short video (20–60s). Standard narration mode. Allowed even if a standard video already exists for the same PR. |
-| `@prvod popcorn` | Extended-depth mini documentary (~5 minutes, 240–320s). Standard narration mode. Covers every changed file - significant changes get 2–3 dedicated scenes, minor changes are grouped. Follows a three-act story arc. Mutually exclusive with `short`. |
+| `@prvod popcorn` | Extended-depth mini documentary (~5 minutes, 240–320s). Standard narration mode. Covers every changed file — significant changes get 2–3 dedicated scenes, minor changes are grouped. Follows a three-act story arc. Mutually exclusive with `short`. |
 | `@prvod deepdive` | Reviewer-style narration. Opt-in only. Can be combined with `short`, `popcorn`, or `script` in either order. |
 | `@prvod script` | Script-only mode: generates the video script JSON, skips TTS/clips/composition. Allowed multiple times per PR. |
 | `@prvod script deepdive` | Script-only output with reviewer-style deepdive narration. `script` still overrides duration modifiers. |
@@ -611,9 +654,9 @@ Popcorn mode produces a ~5-minute mini documentary (240–320 seconds) instead o
 | Script structure | Linear walkthrough | Three-act story arc |
 | Significant changes | 1 scene each | 2–3 scenes each (mechanism, implications, tests) |
 | Minor changes | Often omitted | Grouped into a summary scene |
-| Minimum duration | None enforced | 240s - the script writer retries once if the first attempt is shorter |
+| Minimum duration | None enforced | 240s — the script writer retries once if the first attempt is shorter |
 
-**Story arc:** Popcorn scripts follow a narrative structure - Act 1 (discovery/context), Act 2 (technical deep dive with escalating complexity), Act 3 (resolution/validation).
+**Story arc:** Popcorn scripts follow a narrative structure — Act 1 (discovery/context), Act 2 (technical deep dive with escalating complexity), Act 3 (resolution/validation).
 
 **Triggering popcorn mode:**
 
@@ -621,7 +664,7 @@ Popcorn mode produces a ~5-minute mini documentary (240–320 seconds) instead o
 - CLI: `--popcorn` flag
 - API: `durationMode: "popcorn"` in the request body
 
-`--popcorn` and `--short-dur` are mutually exclusive - the CLI exits with an error if both are passed. On the webhook side, `@prvod popcorn` takes precedence over `@prvod short` if both somehow appear in the same body.
+`--popcorn` and `--short-dur` are mutually exclusive — the CLI exits with an error if both are passed. On the webhook side, `@prvod popcorn` takes precedence over `@prvod short` if both somehow appear in the same body.
 
 **Triggering deepdive mode:**
 
@@ -658,7 +701,7 @@ npm run test:int      # integration tests
 npm run test:watch    # re-run on file changes
 ```
 
-All tests run against mock implementations in `src/mocks/` - no external services, API keys, or database required.
+All tests run against mock implementations in `src/mocks/` — no external services, API keys, or database required.
 
 <details>
 <summary>What's covered</summary>
@@ -688,13 +731,13 @@ PR content (titles, descriptions, diffs, linked issues, milestone text, branch n
 
 | Layer | What | Where |
 |-------|------|-------|
-| 1 | **Input preprocessing** - Unicode normalization, zero-width char stripping, control char removal | `InputSanitizer` |
-| 2 | **Pattern scanning** - 17 injection regex patterns with context-aware masking to reduce false positives | `InputSanitizer` + `injection-patterns.ts` |
-| 3 | **Structural prompt architecture** - XML boundary wrapping, sandwich defense, explicit framing | `script-prompt.ts` |
-| 4 | **Canary token** - per-job random hex embedded in system prompt; detection aborts the job (fail-closed) | `ClaudeScriptWriter` |
-| 5 | **Schema validation** - Zod constrains Claude's output to the VideoScript structure | Existing |
-| 6 | **Output scanning** - credential/PII detection with `[REDACTED]` replacement | `OutputValidator` |
-| 7 | **Content validation** - strips instruction-like patterns and URLs before video/TTS prompts | `OutputValidator` + `buildGroundedClipPrompt` |
+| 1 | **Input preprocessing** — Unicode normalization, zero-width char stripping, control char removal | `InputSanitizer` |
+| 2 | **Pattern scanning** — 17 injection regex patterns with context-aware masking to reduce false positives | `InputSanitizer` + `injection-patterns.ts` |
+| 3 | **Structural prompt architecture** — XML boundary wrapping, sandwich defense, explicit framing | `script-prompt.ts` |
+| 4 | **Canary token** — per-job random hex embedded in system prompt; detection aborts the job (fail-closed) | `ClaudeScriptWriter` |
+| 5 | **Schema validation** — Zod constrains Claude's output to the VideoScript structure | Existing |
+| 6 | **Output scanning** — credential/PII detection with `[REDACTED]` replacement | `OutputValidator` |
+| 7 | **Content validation** — strips instruction-like patterns and URLs before video/TTS prompts | `OutputValidator` + `buildGroundedClipPrompt` |
 
 ### Key properties
 
@@ -723,7 +766,7 @@ For implementation details, see [FOR_DEVELOPER.md](FOR_DEVELOPER.md) and `specs/
 
 **Signed URLs expire.** Default 4 hours. `GET /api/jobs/:id` always regenerates a fresh URL, but links shared directly with users will stop working after expiry.
 
-**Local storage requires `STORAGE_URL_SECRET`.** When `STORAGE_PROVIDER=local` (or `USE_LOCAL_STORAGE=true`), videos are served by the `/api/local-storage/[...key]` route with HMAC-SHA256 signed URLs that mirror the S3 adapter's presigned URL semantics (`?exp=<unix>&sig=<hex>`, expiry from `SIGNED_URL_EXPIRY_HOURS`, tampering invalidates the signature, secret rotation kills every outstanding link). The container refuses to boot without `STORAGE_URL_SECRET` set - generate one with `openssl rand -hex 32` and add it to your `.env.local`. The route is gated off entirely in non-local deployments so it cannot leak in prod.
+**Local storage requires `STORAGE_URL_SECRET`.** When `STORAGE_PROVIDER=local` (or `USE_LOCAL_STORAGE=true`), videos are served by the `/api/local-storage/[...key]` route with HMAC-SHA256 signed URLs that mirror the S3 adapter's presigned URL semantics (`?exp=<unix>&sig=<hex>`, expiry from `SIGNED_URL_EXPIRY_HOURS`, tampering invalidates the signature, secret rotation kills every outstanding link). The container refuses to boot without `STORAGE_URL_SECRET` set — generate one with `openssl rand -hex 32` and add it to your `.env.local`. The route is gated off entirely in non-local deployments so it cannot leak in prod.
 
 ---
 
@@ -753,6 +796,7 @@ pr-to-video/
 │   │       └── RemotionCompositor.ts
 │   ├── interfaces/               # TypeScript interfaces (ports)
 │   └── mocks/                    # Test doubles for all interfaces
+├── docs/                         # Astro Starlight site → docs.prvod.dev
 ├── tests/
 │   ├── unit/                     # Per-module unit tests
 │   └── integration/              # Full pipeline end-to-end
@@ -782,10 +826,15 @@ pr-to-video/
 | Zod + `zod-to-json-schema` | Runtime schema validation + LLM structured output schema generation |
 | Shiki | Syntax highlighting for the code shown on screen |
 | Vitest | Unit and integration test runner |
+| Astro Starlight | Docs site at `docs/` → `docs.prvod.dev` |
 
 ---
 
 ## Further Reading
 
-- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Production deployment guides for Docker, Vercel, Render, Railway, and Fly.io. Includes provider configuration recipes and troubleshooting.
-- **[.env.example](.env.example)** - Every environment variable with inline documentation.
+- **[docs.prvod.dev](https://docs.prvod.dev)** — Quick start, concepts, comparison, and FAQ.
+- **[docs.prvod.dev/compare](https://docs.prvod.dev/compare/)** — Full comparison and ROI write-up (engineering-leader framing kept separate from developer-champion framing).
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** — Production deployment guides for Docker, Vercel, Render, Railway, and Fly.io.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — Contributor onboarding.
+- **[SECURITY.md](SECURITY.md)** — Vulnerability reporting.
+- **[.env.example](.env.example)** — Every environment variable with inline documentation.

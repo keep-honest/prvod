@@ -1,0 +1,131 @@
+---
+title: Concepts
+description: How PRVOD turns a PR diff into a narrated video — pipeline stages, modes, and the knowledge-base model.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+PRVOD is built around one idea: the walkthrough should be generated from the same source the reviewer reads — the diff, the metadata, and the surrounding code. Anything else creates a second source of truth that can drift.
+
+This page covers what the pipeline does, why it does it that way, and where the trade-offs are.
+
+## The pipeline
+
+```
+PR diff + metadata
+     │
+     ▼
+ 1. Parse diff          score files by importance, classify change type
+ 2. Write script (LLM)  4–16 scenes via Claude or Gemini, validated by Zod
+ 2b. Judge script       LLM evaluates coverage + narration, revises failing parts
+ 3. Synthesize speech   Google TTS or model-native voice generates per-scene audio
+ 4. Build scene clips   syntax-highlighted code from the diff, sized to narration
+ 5. Compose final video FFmpeg (default) or Remotion renders clips + captions at 1080p/30fps
+ 6. Upload & deliver    signed URL returned to the caller
+```
+
+### 1. Parse diff
+
+PR content (title, description, diff, linked issues, milestone, branch names) is parsed into a `PRContext`. The diff parser scores each file by importance — lines changed, semantic weight, presence in critical paths — and classifies the overall change type (feature, refactor, fix, docs, infra).
+
+This step is deterministic and cheap. The score it produces drives which files get dedicated scenes versus grouped summaries.
+
+### 2. Write the script
+
+A `ScriptWriter` generates a structured script: 4–16 scenes, each with narration, file references, and code highlights. The script is a Zod-validated JSON object, not free-form prose — schema mismatches fail loudly instead of producing a malformed video.
+
+Provider options (set via `SCRIPT_WRITER`):
+
+| Provider | Use when |
+| --- | --- |
+| `claude-sdk` | Default. Anthropic API, structured output. |
+| `claude-cli` | Local dev with `claude` CLI installed, uses your existing auth. |
+| `gemini-sdk` | Google AI Studio key. Larger token budgets, mandatory thinking budget. |
+| `gemini-cli` | Local Gemini CLI auth. |
+| `codex-cli` | OpenAI Codex CLI. |
+| `mock` | No API calls; deterministic stub for tests. |
+
+### 2b. Judge the script (Self-Refine)
+
+After generation, a second LLM call evaluates the script against two criteria: **coverage** (does it adequately describe the diff?) and **narration quality** (is it clear and coherent?). Failing parts are revised in a follow-up pass — the [Self-Refine](https://arxiv.org/abs/2303.17651) pattern.
+
+The judge step is optional and degrades gracefully. Set `SKIP_JUDGE=true` to bypass it (faster, cheaper, lower quality).
+
+### 3. Synthesize speech
+
+Each scene's narration is synthesized to audio. Two paths:
+
+- **Google Cloud TTS** (default for production) — Neural2 / WaveNet / Chirp HD / Chirp3 HD voices with SSML word-timing marks for accurate caption sync.
+- **Built-in / model-native TTS** (`USE_BUILTIN_TTS=true`) — no Google Cloud key, lower fidelity, fine for local dev.
+
+Per-attempt timeouts and retry backoff are configurable via `GOOGLE_TTS_*` env vars.
+
+### 4. Build scene clips
+
+For each scene, the corresponding code snippet is syntax-highlighted (via [Shiki](https://shiki.style)), rasterized to PNG (via Sharp), and sized to the narration duration. This is the "code on screen" you see during playback.
+
+### 5. Compose the final video
+
+Two compositors:
+
+- **FFmpeg** (default) — filter graph at 1080p / 30fps. No cold start, fast, deterministic.
+- **Remotion** (`VIDEO_COMPOSITOR=remotion`) — React-based composition, more flexible, 20–40s cold start for the webpack bundle. Pre-baked Chrome Headless Shell in the Docker image.
+
+### 6. Upload and deliver
+
+The finished MP4 is uploaded to the configured storage (Cloudflare R2, AWS S3, or local filesystem). The API returns a signed URL valid for `SIGNED_URL_EXPIRY_HOURS` (default 4 hours). `GET /api/jobs/:id` regenerates a fresh URL on every poll.
+
+### Checkpoints and retry
+
+After expensive steps (script generation, scene compositing), the pipeline writes a `PipelineCheckpoint`. `POST /api/jobs/:id/retry` resumes from the latest checkpoint instead of rerunning the entire pipeline.
+
+<Aside type="caution">
+Checkpoints are local-filesystem by default. In multi-instance deployments, retry requests must hit the same instance that wrote the checkpoint. Swap `LocalCheckpointStore` for a database-backed implementation for horizontal scaling.
+</Aside>
+
+## Modes
+
+A single annotation switches mode. The pipeline branches at script generation; downstream stages are identical.
+
+| Mode | Duration | When to use |
+| --- | --- | --- |
+| **Standard** | 20–120s | Default. Most PRs. |
+| **Short** | 20–60s | Bug fixes, single-file changes, anything you want to share in a Slack thread. |
+| **Popcorn** | 240–320s | Large PRs where a quick overview isn't enough. Three-act story arc; every changed file mentioned. |
+| **Deepdive** | Same as base mode | Reviewer-style narration — asks questions, surfaces concerns. Opt-in modifier on any of the above. |
+
+## The knowledge-base model
+
+Each walkthrough lives at a permanent URL: `/reviews/[jobId]` (server-rendered review page) and `/watch/[jobId]` (HMAC-signed share player). The videos don't disappear when the PR closes.
+
+PR by PR, your project accumulates a code-derived archive of how it got to its current state. The archive is structurally aligned with the diff history because each video was generated from the diff itself — there's no separate authoring step to fall behind.
+
+This is the property that makes PRVOD different from manual screencasts or static docs: drift is not a maintenance problem you have to manage, because there is nothing to maintain.
+
+## Architecture
+
+The codebase follows a 4-layer dependency inversion pattern. Dependencies point inward only.
+
+```
+Layer 1: src/interfaces/          Port definitions (IScriptWriter, ITTSService, IVideoCompositor, ...)
+Layer 2: src/domain/              Business logic, entities, services (PipelineRunner, VideoOrchestrator)
+Layer 3: src/infrastructure/      Implementations (Postgres, R2, Google TTS, FFmpeg, Remotion, Claude, Gemini)
+Layer 4: src/app/api/             Next.js route handlers, CLI entrypoints
+```
+
+The DI container at `src/config/container.ts` is a lazy singleton with environment-driven wiring. Setting `NODE_ENV=test` or `USE_MOCK_SERVICES=true` swaps every binding for an in-memory mock — the full pipeline runs without a database, LLM, or storage backend.
+
+## Prompt-injection defense
+
+PR content (titles, descriptions, diffs, linked issues, milestone text, branch names) is untrusted user input that flows into LLM prompts. A 7-layer defense pipeline protects against prompt injection: input preprocessing, pattern scanning, structural prompt architecture, canary tokens, schema validation, output scanning, and content validation.
+
+Details at [README.md → Security](https://github.com/keep-honest/prvod#security).
+
+## Limitations
+
+- **No job queue.** Jobs run as fire-and-forget promises in the Next.js process. For production scale, swap `PipelineRunner.run()` for a worker queue (BullMQ, Trigger.dev).
+- **Remotion cold start.** First Remotion render takes 20–40s for webpack bundling. The default FFmpeg compositor has no cold start.
+- **Non-English injection patterns.** The prompt-injection guard is English-only.
+- **Signed URLs expire.** Default 4 hours. Links shared directly will stop working after expiry; `GET /api/jobs/:id` regenerates them.
+
+The full list lives at [README.md → Known Limitations](https://github.com/keep-honest/prvod#known-limitations).
