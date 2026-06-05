@@ -1,11 +1,19 @@
-/** Strips query parameters from a URL to avoid logging signed tokens or API keys. */
+/**
+ * Strips credentials and query parameters from a URL so it is safe to log.
+ * Removes both the userinfo component (`user:password@`, e.g. the password in
+ * a `postgresql://` connection string) and the query string (signed tokens or
+ * API keys). Returns scheme + host + path only.
+ */
 export function redactUrl(url: string): string {
   try {
     const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
     parsed.search = "";
     return parsed.toString();
   } catch {
-    return url.split("?")[0];
+    // Best-effort fallback for unparseable input: drop userinfo and query.
+    return url.split("?")[0].replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1");
   }
 }
 

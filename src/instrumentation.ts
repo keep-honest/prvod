@@ -39,10 +39,23 @@ export async function register() {
     process.exit(1);
   }
 
+  let host: string;
+  let port: number;
   try {
-    const { hostname: host, port: portStr } = new URL(databaseUrl);
-    const port = parseInt(portStr, 10) || 5432;
+    const parsed = new URL(databaseUrl);
+    host = parsed.hostname;
+    port = parseInt(parsed.port, 10) || 5432;
+  } catch {
+    // Never log the raw parse error: Node's ERR_INVALID_URL carries the
+    // offending input on `error.input`, which would echo the full
+    // DATABASE_URL — including the password — to stdout.
+    console.error(
+      "[startup] DATABASE_URL is not a valid URL — server will not start",
+    );
+    process.exit(1);
+  }
 
+  try {
     // Dynamic import keeps `net` out of webpack's static import graph so it
     // is not bundled. Node.js resolves it at runtime from the built-in list.
     const net = await import("net");
