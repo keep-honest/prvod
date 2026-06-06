@@ -13,13 +13,6 @@ leaks a database credential, which makes this a small security win too.
 
 ## The problem
 
-- `src/infrastructure/persistence/db.ts:14`
-  ```ts
-  console.log(`Connecting to database at ${trimmedUrl}...`);
-  ```
-  `trimmedUrl` is the full `DATABASE_URL` connection string — **including the
-  password**. This both bypasses the logger and writes a secret to stdout.
-
 - `src/instrumentation.ts:22, 30, 36, 62, 64, 88, 95` — startup hook uses
   `console.log/warn/error` throughout instead of the logger.
 
