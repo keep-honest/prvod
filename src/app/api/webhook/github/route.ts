@@ -12,6 +12,7 @@ import type { IPipelineCheckpointStore } from "@/interfaces/IPipelineCheckpoint"
 import { buildErrorComment } from "@/app/api/webhook/github/errorComment";
 import { createPipelineRunner } from "@/app/api/pipelineFactory";
 import { describeGitHubError } from "@/infrastructure/github/githubFetch";
+import { buildReviewPageUrl } from "@/app/api/webhook/github/reviewPageUrl";
 
 const logger = createLogger("webhook/github");
 
@@ -20,19 +21,6 @@ const REPO_FULL_NAME_REGEX = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const RECEIVED_RETRY_AFTER_MS = 5 * 60 * 1000;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-function buildReviewPageUrl(jobId: string): string {
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://localhost:3000";
-  const base = appUrl.endsWith("/") ? appUrl.slice(0, -1) : appUrl;
-  const url = `${base}/reviews/${encodeURIComponent(jobId)}`;
-  // Basic validation — catch misconfigured NEXT_PUBLIC_APP_URL early
-  try {
-    new URL(url);
-  } catch {
-    throw new Error(`Invalid review page URL: "${url}" (check NEXT_PUBLIC_APP_URL)`);
-  }
-  return url;
-}
 
 function buildReviewPageComment(reviewPageUrl: string): string {
   return [
@@ -178,7 +166,7 @@ function buildCommentForJob(job: VideoJob): { comment: string; commentType: stri
     if (job.videoUrl || job.objectKey) {
       try {
         return {
-          comment: buildReviewPageComment(buildReviewPageUrl(job.id)),
+          comment: buildReviewPageComment(buildReviewPageUrl(job.id, { repoIsPrivate: job.repoIsPrivate })),
           commentType: "success",
         };
       } catch (urlErr) {

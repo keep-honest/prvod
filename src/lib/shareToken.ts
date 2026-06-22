@@ -127,6 +127,8 @@ export function verifyToken(
  * @param type - `"full"` for authenticated walkthrough, `"video"` for public player
  * @param baseUrl - App origin (e.g. `https://prvod.dev`)
  * @param secret - HMAC signing secret
+ * @param expirySeconds - Override the default 7-day expiry. Used for PR-comment
+ *   review links on private repos, which must outlive a typical PR review cycle.
  * @returns URL string and expiry date
  */
 export function makeShareUrl(
@@ -134,8 +136,9 @@ export function makeShareUrl(
   type: ShareType,
   baseUrl: string,
   secret: string,
+  expirySeconds: number = SEVEN_DAYS_SECONDS,
 ): ShareTokenResult {
-  const exp = Math.floor(Date.now() / 1000) + SEVEN_DAYS_SECONDS;
+  const exp = Math.floor(Date.now() / 1000) + expirySeconds;
   const token = signToken({ jobId, type, exp }, secret);
 
   const path =

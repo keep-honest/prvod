@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { loadReviewPage } from "@/lib/reviews/loadReviewPage";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   routeContext: { params: Promise<{ jobId: string }> },
 ) {
   const { jobId } = await routeContext.params;
-  const result = await loadReviewPage({ jobId });
+  const shareToken = new URL(request.url).searchParams.get("shareToken") ?? undefined;
+  const result = await loadReviewPage({ jobId, shareToken });
 
   if (!result.ok) {
     return NextResponse.json(
