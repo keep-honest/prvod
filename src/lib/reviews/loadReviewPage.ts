@@ -4,6 +4,7 @@ import type { ReviewPageModel } from "@/domain/entities/ReviewPage";
 import { videoScriptSchema } from "@/domain/entities/VideoScript";
 import { isValidUuid } from "@/lib/validation";
 import { createLogger } from "@/lib/logger";
+import { verifyToken } from "@/lib/shareToken";
 
 const logger = createLogger("loadReviewPage");
 
@@ -15,9 +16,10 @@ export type LoadReviewPageResult =
 
 export async function loadReviewPage(args: {
   jobId: string;
+  shareToken?: string;
   container?: Container;
 }): Promise<LoadReviewPageResult> {
-  const { jobId } = args;
+  const { jobId, shareToken } = args;
   const container = args.container ?? await getContainer();
 
   if (!isValidUuid(jobId)) {
@@ -46,6 +48,41 @@ export async function loadReviewPage(args: {
       error: "NOT_FOUND",
       message: "Review page not found",
     };
+  }
+
+  // Private-repo reviews require a valid HMAC share token. On any failure mode
+  // (missing secret, missing token, bad token, wrong jobId/type) we return 404
+  // rather than 401/403 — revealing the job's existence is itself a leak.
+  if (job.repoIsPrivate) {
+    const secret = process.env.SHARE_SIGNING_SECRET;
+    if (!secret) {
+      logger.error("SHARE_SIGNING_SECRET not configured — cannot serve private-repo review", { jobId });
+      return {
+        ok: false,
+        status: 503,
+        error: "SERVICE_UNAVAILABLE",
+        message: "Review page services are unavailable",
+      };
+    }
+    if (!shareToken) {
+      logger.debug("Private-repo review blocked: missing share token", { jobId });
+      return {
+        ok: false,
+        status: 404,
+        error: "NOT_FOUND",
+        message: "Review page not found",
+      };
+    }
+    const payload = verifyToken(shareToken, secret);
+    if (!payload || payload.jobId !== jobId || payload.type !== "full") {
+      logger.debug("Private-repo review blocked: invalid share token", { jobId });
+      return {
+        ok: false,
+        status: 404,
+        error: "NOT_FOUND",
+        message: "Review page not found",
+      };
+    }
   }
 
   const parsedScript = videoScriptSchema.safeParse(job.scriptJson);

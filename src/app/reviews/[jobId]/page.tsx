@@ -10,14 +10,20 @@ import { ReviewPageClient } from "./ReviewPageClient";
 const logger = createLogger("reviews/[jobId]/page");
 
 export async function generateMetadata(
-  props: { params: Promise<{ jobId: string }> },
+  props: {
+    params: Promise<{ jobId: string }>;
+    searchParams: Promise<{ shareToken?: string }>;
+  },
 ): Promise<Metadata> {
   const { jobId } = await props.params;
   try {
     if (isValidUuid(jobId)) {
       const container = await getContainer();
       const job = await container.jobRepository.findById(jobId);
-      if (job?.status === "completed") {
+      // For private repos we intentionally skip enriched metadata — repo name
+      // and PR number are leakable signals that should only surface after the
+      // share-token is verified in the page body.
+      if (job?.status === "completed" && !job.repoIsPrivate) {
         return {
           title: `${job.repoFullName} PR #${job.prNumber} | PrVod Review`,
           description: `Code-first walkthrough for ${job.repoFullName} pull request #${job.prNumber}.`,
@@ -33,14 +39,19 @@ export async function generateMetadata(
   return {
     title: `Review ${jobId} | PrVod`,
     description: "Code-first pull request review page.",
+    robots: "noindex",
   };
 }
 
 export default async function ReviewPage(
-  props: { params: Promise<{ jobId: string }> },
+  props: {
+    params: Promise<{ jobId: string }>;
+    searchParams: Promise<{ shareToken?: string }>;
+  },
 ) {
   const { jobId } = await props.params;
-  const result = await loadReviewPage({ jobId });
+  const { shareToken } = await props.searchParams;
+  const result = await loadReviewPage({ jobId, shareToken });
 
   if (!result.ok) {
     if (result.status === 404) {
