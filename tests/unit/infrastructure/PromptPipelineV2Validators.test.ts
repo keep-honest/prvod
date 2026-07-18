@@ -6,6 +6,7 @@ import {
   validateScriptEvidenceGrounding,
   validateReviewerNarration,
   enforceReviewerNarration,
+  validateCodeBindings,
   POPCORN_MIN_SCENE_COUNT,
 } from "@/infrastructure/llm/promptPipelineV2Validators";
 import {
@@ -885,6 +886,113 @@ describe("PromptPipelineV2 deterministic validators", () => {
       const result = validateSceneOutlineConsistency(baseCoverage, brokenOutline, "popcorn");
       expect(result.passed).toBe(false);
       expect(result.issues.some((issue) => issue.includes("exactly one overview scene"))).toBe(true);
+    });
+  });
+
+  describe("validateCodeBindings", () => {
+    function makeScript(scenes: Array<Partial<typeof PROMPT_PIPELINE_V2_EVAL_CORPUS[0]["script"]["scenes"][number]>>) {
+      const base = PROMPT_PIPELINE_V2_EVAL_CORPUS[0].script;
+      return {
+        ...base,
+        scenes: scenes.map((s, i) => ({
+          sceneNumber: i + 1,
+          sceneType: "code_walkthrough" as const,
+          durationSeconds: 6,
+          narration: "the function alpha computes the result",
+          codeBroll: [{
+            filePath: "src/a.ts",
+            code: "function alpha() { return 1 }\nfunction beta() {}",
+            language: "typescript",
+            lineRange: [10, 11] as [number, number],
+            highlights: [],
+          }],
+          ...s,
+        })),
+      };
+    }
+
+    it("passes when codeBindings are absent or empty (heuristic path)", () => {
+      const script = makeScript([{}, {}]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(true);
+      expect(result.strippedScenes).toEqual([]);
+    });
+
+    it("flags codeBrollIndex out of range", () => {
+      const script = makeScript([{
+        codeBindings: [{ wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 5, highlightLines: [], relatesToCodeBrollIndices: [] }],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(false);
+      expect(result.strippedScenes).toEqual([1]);
+      expect(result.violations[0].reason).toContain("codeBrollIndex 5 out of range");
+    });
+
+    it("flags wordStartIndex/wordEndIndex past the scene's word count", () => {
+      const script = makeScript([{
+        narration: "short narration only", // 3 spoken words
+        codeBindings: [{ wordStartIndex: 0, wordEndIndex: 99, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] }],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(false);
+      expect(result.violations[0].reason).toContain("exceeds scene word count");
+    });
+
+    it("flags inverted word range (wordEndIndex < wordStartIndex)", () => {
+      const script = makeScript([{
+        codeBindings: [{ wordStartIndex: 5, wordEndIndex: 2, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] }],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(false);
+      expect(result.violations[0].reason).toContain("invalid word range");
+    });
+
+    it("flags highlightLines outside the snippet's lineRange", () => {
+      const script = makeScript([{
+        codeBindings: [{ wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 0, highlightLines: [99, 100], relatesToCodeBrollIndices: [] }],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(false);
+      expect(result.violations[0].reason).toContain("outside snippet line range");
+    });
+
+    it("flags self-relation in relatesToCodeBrollIndices", () => {
+      const script = makeScript([{
+        codeBindings: [{ wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [0] }],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(false);
+      expect(result.violations[0].reason).toContain("relatesToCodeBrollIndices");
+    });
+
+    it("flags OOB relatesToCodeBrollIndices", () => {
+      const script = makeScript([{
+        codeBindings: [{ wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [5] }],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(false);
+    });
+
+    it("groups violations by sceneNumber in strippedScenes", () => {
+      const script = makeScript([
+        {
+          codeBindings: [{ wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 99, highlightLines: [], relatesToCodeBrollIndices: [] }],
+        },
+        {}, // valid scene
+        {
+          codeBindings: [{ wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 99, highlightLines: [], relatesToCodeBrollIndices: [] }],
+        },
+      ]);
+      const result = validateCodeBindings(script as never);
+      expect(result.strippedScenes).toEqual([1, 3]);
+    });
+
+    it("accepts valid bindings without flagging", () => {
+      const script = makeScript([{
+        codeBindings: [{ wordStartIndex: 1, wordEndIndex: 2, codeBrollIndex: 0, highlightLines: [10], relatesToCodeBrollIndices: [] }],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(true);
     });
   });
 });

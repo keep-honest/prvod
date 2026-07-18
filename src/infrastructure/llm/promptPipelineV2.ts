@@ -114,7 +114,30 @@ function buildScriptWritingRules(
     "Overview scene (scene 1) narration must not exceed 40 spoken words. Keep it concise — set the stage, don't explain implementation.",
     buildWordBudgetLine(ctx),
     'In code-first mode, codeBroll is the ONLY visual content. Every technical scene (code_walkthrough, before_after, architecture, summary) MUST include at least one codeBroll entry using files from the scene\'s assigned evidence. Only overview and closing scenes may have empty codeBroll. Scenes without codeBroll will render as blank screens.',
+    buildCodeBindingsContractLine(),
   ];
+}
+
+/**
+ * Optional contract section for the `codeBindings` field on each Scene.
+ * Sparse-but-correct beats dense-but-wrong: a deterministic heuristic
+ * parses backtick identifiers + file basenames from narration when
+ * bindings are absent or malformed, so the LLM can safely omit bindings
+ * for unclear cases without leaving the WordSyncedCodeStage stranded.
+ */
+function buildCodeBindingsContractLine(): string {
+  return [
+    "codeBindings (OPTIONAL per scene):",
+    "  Shape: { wordStartIndex, wordEndIndex (inclusive), codeBrollIndex, highlightLines?, relatesToCodeBrollIndices? }.",
+    "  wordStartIndex/wordEndIndex are 0-based positions in the scene's spoken-word stream (post-sanitization).",
+    "  codeBrollIndex points into the scene's codeBroll array (0-based).",
+    "  Emit bindings ONLY when you can guarantee correctness — when omitted, a deterministic fallback parses backtick identifiers + file basenames from narration to drive on-screen code swaps. Sparse-but-correct beats dense-but-wrong.",
+    "  WRONG: wordStartIndex past the scene's narration word count.",
+    "  WRONG: codeBrollIndex 3 when codeBroll has 2 entries.",
+    "  WRONG: highlightLines outside the snippet's lineRange.",
+    "  RIGHT: spans cover the exact words that name or describe the snippet (e.g. words 5..8 of narration matching the function name).",
+    "  RIGHT: relatesToCodeBrollIndices used only when narration explicitly draws a relationship between two snippets (\"called from\", \"passed to\", \"wraps\").",
+  ].join("\n");
 }
 
 /**

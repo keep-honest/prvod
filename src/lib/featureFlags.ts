@@ -43,3 +43,18 @@ export function isReviewerViolationWarnOnly(env: NodeJS.ProcessEnv = process.env
 export function isJudgeSkipped(env: NodeJS.ProcessEnv = process.env): boolean {
   return isEnabled(env.SKIP_JUDGE);
 }
+
+/**
+ * When `WORD_SYNCED_CODE=true`, the Remotion compositor's per-scene code-
+ * snippet stage swaps snippets in sync with TTS word timings, animates
+ * snippet position transitions, draws SVG arrows between LLM-declared
+ * related snippets, and animates highlight bands over the lines the
+ * narration is mentioning at each moment. The legacy static `<CodeBrollOverlay>`
+ * stays in place when the flag is off, when codeBroll is empty, or when
+ * the scene has no word timings (e.g. genuinely silent scenes).
+ *
+ * Default off pending staging validation.
+ */
+export function isWordSyncedCodeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isEnabled(env.WORD_SYNCED_CODE);
+}

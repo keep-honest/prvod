@@ -58,6 +58,7 @@ import {
   validateReviewerNarration,
   enforceReviewerNarration,
   validateTotalWordBudget,
+  validateCodeBindings,
 } from "@/infrastructure/llm/promptPipelineV2Validators";
 import type { ReviewConcern, ReviewPosture } from "@/domain/entities/PromptPipelineV2";
 import { tryParseJson, tryValidate, repairLoop, isLlmValidationError, getMaxRepairAttempts, completeJsonWithRepair } from "@/infrastructure/llm/promptPipelineV2Repair";
@@ -1768,6 +1769,27 @@ export async function generateScriptWithPromptPipelineV2(
 
   // Force last scene to overview for constellation graph overlay.
   script = ensureLastSceneOverview(script);
+
+  // Soft-fail validation: strip invalid `codeBindings` per scene + log
+  // a single warning per affected scene. The WordSyncedCodeStage falls
+  // back to heuristic bindings when codeBindings is empty/absent, so a
+  // stripped scene degrades gracefully instead of failing the job.
+  const codeBindingsValidation = validateCodeBindings(script);
+  if (!codeBindingsValidation.passed) {
+    const strippedSet = new Set(codeBindingsValidation.strippedScenes);
+    logger.warn("Word-synced code bindings stripped — falling back to heuristic for affected scenes", {
+      errorTag: "INVALID_CODE_BINDINGS_STRIPPED",
+      affectedSceneCount: strippedSet.size,
+      affectedScenes: [...strippedSet],
+      violations: codeBindingsValidation.violations,
+    });
+    script = {
+      ...script,
+      scenes: script.scenes.map((scene) =>
+        strippedSet.has(scene.sceneNumber) ? { ...scene, codeBindings: [] } : scene,
+      ),
+    };
+  }
 
   const artifacts: PromptPipelineV2Artifacts = promptPipelineV2ArtifactsSchema.parse({
     enabled: true,

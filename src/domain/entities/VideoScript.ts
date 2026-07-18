@@ -57,6 +57,23 @@ export const codeBrollSchema = z.object({
   highlights: z.array(z.number()).default([]),
 });
 
+/**
+ * Word-synced binding: maps a narration word span (inclusive) to a codeBroll
+ * index, optionally highlighting specific lines and declaring related snippets
+ * that the WordSyncedCodeStage should connect with SVG arrows.
+ *
+ * Word indices reference the spoken-word stream AFTER `sanitizeSpokenNarrationText`
+ * so they survive TTS retiming and align 1:1 with `wordTimings`. `wordEndIndex`
+ * is inclusive to match how the LLM naturally describes spans.
+ */
+export const codeBindingSchema = z.object({
+  wordStartIndex: z.number().int().nonnegative(),
+  wordEndIndex: z.number().int().nonnegative(),
+  codeBrollIndex: z.number().int().nonnegative(),
+  highlightLines: z.array(z.number().int().positive()).default([]),
+  relatesToCodeBrollIndices: z.array(z.number().int().nonnegative()).default([]),
+});
+
 export const sceneSchema = z.object({
   sceneNumber: z.number().int().positive(),
   sceneType: sceneTypeEnum,
@@ -67,6 +84,14 @@ export const sceneSchema = z.object({
     (val) => (val === null || val === undefined ? [] : Array.isArray(val) ? val : [val]),
     z.array(codeBrollSchema).default([]),
   ),
+  /**
+   * Optional per-narration-word bindings driving the WORD_SYNCED_CODE stage.
+   * Truly optional (no default) so legacy scripts and minimal Scene-shaped
+   * test fixtures don't need to set `codeBindings: []` everywhere. The
+   * WordSyncedCodeStage's resolver normalises `undefined` → `[]` at the
+   * single consumer boundary.
+   */
+  codeBindings: z.array(codeBindingSchema).optional(),
 });
 
 export const MIN_SCRIPT_SCENES = 3;
@@ -185,6 +210,7 @@ export const batchScenesTransportSchema = z.object({
 });
 
 export type CodeBroll = z.infer<typeof codeBrollSchema>;
+export type CodeBinding = z.infer<typeof codeBindingSchema>;
 export type Scene = z.infer<typeof sceneSchema>;
 export type NarrativeRole = z.infer<typeof narrativeRoleSchema>;
 export type VoiceAssignment = z.infer<typeof voiceAssignmentSchema>;

@@ -744,3 +744,91 @@ export function validateTotalWordBudget(
 
   return { passed: true, violations: [], repairMessage: "" };
 }
+
+// ── Word-synced code bindings validation ───────────────────────────────
+
+export interface CodeBindingViolation {
+  sceneNumber: number;
+  bindingIndex: number;
+  reason: string;
+}
+
+export interface CodeBindingValidationResult {
+  passed: boolean;
+  /** Per-scene scene numbers whose bindings were stripped. Decorative — heuristic fallback will fill in. */
+  strippedScenes: number[];
+  violations: CodeBindingViolation[];
+}
+
+/**
+ * Soft-fail validator for `codeBindings` on each scene. The bindings are
+ * decorative (WordSyncedCodeStage gracefully degrades to heuristic when
+ * they're missing/invalid), so this validator never throws — it returns
+ * the offending scenes so the caller can strip the bindings and log a
+ * single `INVALID_CODE_BINDINGS_STRIPPED` warning per scene.
+ *
+ * Per-binding checks:
+ *  - `codeBrollIndex < scene.codeBroll.length`
+ *  - `0 ≤ wordStartIndex ≤ wordEndIndex < countSpokenWords(scene.narration)`
+ *  - every `highlightLines[i]` within the target snippet's `lineRange`
+ *    (or anywhere in `code` line span if `lineRange` is null)
+ *  - every `relatesToCodeBrollIndices[i] < scene.codeBroll.length` AND `≠ codeBrollIndex`
+ */
+export function validateCodeBindings(script: VideoScript): CodeBindingValidationResult {
+  const violations: CodeBindingViolation[] = [];
+  const strippedScenes = new Set<number>();
+
+  for (const scene of script.scenes) {
+    const bindings = scene.codeBindings ?? [];
+    if (bindings.length === 0) continue;
+    const wordCount = countSpokenWords(scene.narration);
+    const cbCount = scene.codeBroll.length;
+
+    bindings.forEach((b, bindingIndex) => {
+      const pushViolation = (reason: string) => {
+        violations.push({ sceneNumber: scene.sceneNumber, bindingIndex, reason });
+        strippedScenes.add(scene.sceneNumber);
+      };
+      if (b.codeBrollIndex < 0 || b.codeBrollIndex >= cbCount) {
+        pushViolation(`codeBrollIndex ${b.codeBrollIndex} out of range [0, ${cbCount})`);
+        return;
+      }
+      if (b.wordStartIndex < 0 || b.wordEndIndex < b.wordStartIndex) {
+        pushViolation(`invalid word range [${b.wordStartIndex}, ${b.wordEndIndex}]`);
+        return;
+      }
+      if (b.wordStartIndex >= wordCount || b.wordEndIndex >= wordCount) {
+        pushViolation(`word range [${b.wordStartIndex}, ${b.wordEndIndex}] exceeds scene word count ${wordCount}`);
+        return;
+      }
+      const target = scene.codeBroll[b.codeBrollIndex];
+      const snippetLines = target.code.split("\n").length;
+      const minLine = target.lineRange ? target.lineRange[0] : 1;
+      const maxLine = target.lineRange ? target.lineRange[1] : snippetLines;
+      const badHighlights = (b.highlightLines ?? []).filter(
+        (line) => line < minLine || line > maxLine,
+      );
+      if (badHighlights.length > 0) {
+        pushViolation(
+          `highlightLines [${badHighlights.join(", ")}] outside snippet line range [${minLine}, ${maxLine}]`,
+        );
+        return;
+      }
+      const badRelations = (b.relatesToCodeBrollIndices ?? []).filter(
+        (idx) => idx < 0 || idx >= cbCount || idx === b.codeBrollIndex,
+      );
+      if (badRelations.length > 0) {
+        pushViolation(
+          `relatesToCodeBrollIndices [${badRelations.join(", ")}] invalid (must be < ${cbCount} and ≠ ${b.codeBrollIndex})`,
+        );
+        return;
+      }
+    });
+  }
+
+  return {
+    passed: violations.length === 0,
+    strippedScenes: [...strippedScenes],
+    violations,
+  };
+}

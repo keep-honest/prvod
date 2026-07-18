@@ -11,6 +11,8 @@ import type { SceneTimelineEntry } from "@/interfaces/IClipAsset";
 import type { GraphLayoutData } from "@/infrastructure/video/graph/types";
 import { AIClipScene } from "./components/AIClipScene";
 import { CodeBrollOverlay } from "./components/CodeBrollOverlay";
+import { WordSyncedCodeStage } from "./components/WordSyncedCodeStage";
+import { isWordSyncedCodeEnabled } from "@/lib/featureFlags";
 import { CaptionOverlay } from "./components/CaptionOverlay";
 import { CodeFirstScene } from "./components/CodeFirstScene";
 import { ConstellationScene } from "./components/ConstellationScene";
@@ -138,13 +140,32 @@ const SceneClip: React.FC<SceneClipProps> = ({
             );
           });
       })()}
-      {!isCodeOnlyScene && scene.codeBroll[0] && (
-        <CodeBrollOverlay
-          codeBroll={scene.codeBroll[0]}
-          startFrame={0}
-          durationFrames={durationInFrames}
-        />
-      )}
+      {!isCodeOnlyScene && scene.codeBroll[0] && (() => {
+        // Word-synced stage only when: flag enabled, codeBroll exists, and
+        // the scene has word timings (genuinely silent scenes fall through
+        // to the legacy static overlay since there's no timing source).
+        const useWordSync =
+          isWordSyncedCodeEnabled() &&
+          scene.codeBroll.length > 0 &&
+          (sceneWordTimings?.length ?? 0) > 0;
+        if (useWordSync && sceneWordTimings) {
+          return (
+            <WordSyncedCodeStage
+              scene={scene}
+              wordTimings={sceneWordTimings}
+              startFrame={0}
+              durationFrames={durationInFrames}
+            />
+          );
+        }
+        return (
+          <CodeBrollOverlay
+            codeBroll={scene.codeBroll[0]}
+            startFrame={0}
+            durationFrames={durationInFrames}
+          />
+        );
+      })()}
       {/* Per-scene narration audio — local frame clock (0-based) matches per-scene word timings */}
       {!audioIncluded && sceneAudioSrc && <Audio src={sceneAudioSrc} />}
       {!audioIncluded && sceneWordTimings?.length && (
