@@ -17,6 +17,7 @@ import {
 import { DiffCorpusBuilder } from "@/domain/services/DiffCorpusBuilder";
 import { createLogger } from "@/lib/logger";
 import { createDiffJobTimeout } from "@/lib/diff-job-timeout";
+import { buildPersistedReviewWorkspaceMetrics } from "@/lib/reviews/reviewDiffSnapshot";
 import { DiffTooLargeError, DiffFetchTimeoutError, DiffParseError } from "@/lib/diff-errors";
 import type { VideoScript } from "@/domain/entities/VideoScript";
 import type { PromptPipelineV2Artifacts } from "@/domain/entities/PromptPipelineV2";
@@ -121,7 +122,7 @@ export class PipelineRunner {
 
       if (scriptOnly) {
         const result = await orchestrator.executeScriptOnly(jobId, prContext, corpus);
-        const metrics = await this.buildCompletionMetrics(jobId, result.script, prContext, installationId, result.promptPipelineV2);
+        const metrics = await this.buildCompletionMetrics(jobId, result.script, prContext, installationId, result.promptPipelineV2, undefined, corpus);
         await this.jobRepository.updateStatus(jobId, "completed", {
           scriptJson: result.script,
           metricsJson: metrics,
@@ -130,7 +131,7 @@ export class PipelineRunner {
         logger.info("Script-only job completed", { scenes: result.script.scenes.length });
       } else if (ttsOnly) {
         const result = await orchestrator.executeTTSOnly(jobId, prContext, corpus);
-        const metrics = await this.buildCompletionMetrics(jobId, result.script, prContext, installationId, result.promptPipelineV2);
+        const metrics = await this.buildCompletionMetrics(jobId, result.script, prContext, installationId, result.promptPipelineV2, undefined, corpus);
         await this.jobRepository.updateStatus(jobId, "completed", {
           scriptJson: result.script,
           ttsAudioJson: result.perSceneAudio.map((audio) => ({
@@ -148,7 +149,7 @@ export class PipelineRunner {
         });
       } else {
         const result = await orchestrator.execute(jobId, prContext, corpus);
-        const metrics = await this.buildCompletionMetrics(jobId, result.script, prContext, installationId, result.promptPipelineV2);
+        const metrics = await this.buildCompletionMetrics(jobId, result.script, prContext, installationId, result.promptPipelineV2, undefined, corpus);
         if (metrics && result.sceneTimelineFrames) {
           metrics.sceneTimeline = result.sceneTimelineFrames;
         }
@@ -219,7 +220,7 @@ export class PipelineRunner {
       const result = await orchestrator.resume(jobId);
       let metrics = await this.buildCompletionMetrics(
         jobId, result.script, checkpoint?.prContext, existingJob?.githubInstallationId ?? undefined,
-        result.promptPipelineV2, existingReviewGraphSource,
+        result.promptPipelineV2, existingReviewGraphSource, retryCorpus,
       );
       metrics = this.mergeMetricsField(metrics, "durationMode", existingDurationMode);
       metrics = this.mergeMetricsField(metrics, "sceneTimeline", result.sceneTimelineFrames);
@@ -300,11 +301,12 @@ export class PipelineRunner {
     installationId: number | undefined,
     promptPipelineV2?: PromptPipelineV2Artifacts,
     reviewGraphFallback?: ReviewGraphSource,
+    corpus?: DiffMetadataCorpus,
   ): Promise<Record<string, unknown> | null> {
     const reviewGraphSource = await this.captureReviewGraphSource(
       jobId, script, prContext, installationId, reviewGraphFallback,
     );
-    return this.buildMetrics(script, prContext, promptPipelineV2, reviewGraphSource);
+    return this.buildMetrics(script, prContext, promptPipelineV2, reviewGraphSource, corpus);
   }
 
   private mergeMetricsField(
@@ -420,6 +422,7 @@ export class PipelineRunner {
     prContext?: PRContext,
     promptPipelineV2?: PromptPipelineV2Artifacts,
     reviewGraphSource?: ReviewGraphSource,
+    corpus?: DiffMetadataCorpus,
   ): Record<string, unknown> | null {
     const modeMetadata = {
       ...(prContext?.durationMode && prContext.durationMode !== "default"
@@ -428,9 +431,23 @@ export class PipelineRunner {
       ...(prContext?.deepdive ? { deepdive: true } : {}),
     };
 
-    void script;
+    // Reconstruct a unified-diff string from the streamed corpus. spec-005 removed
+    // PRContext.diff; the diff workspace metrics now derive from corpus snippets.
+    // Hunk-kind snippets already start with "@@" so they reassemble into a parseable
+    // unified diff. Files without hunk snippets (oversized/binary) contribute only a
+    // header — the workspace UI degrades gracefully (no anchors for those files).
+    const reconstructedDiff = corpus ? reconstructUnifiedDiffFromCorpus(corpus) : "";
+    const workspaceMetrics = prContext
+      ? buildPersistedReviewWorkspaceMetrics({
+          diff: reconstructedDiff,
+          headSha: prContext.headSha || prContext.headBranch,
+          headRepoFullName: prContext.headRepoFullName ?? prContext.repoFullName,
+          script,
+          promptPipelineV2,
+        })
+      : null;
 
-    if (!promptPipelineV2 && !reviewGraphSource) {
+    if (!promptPipelineV2 && !reviewGraphSource && !workspaceMetrics) {
       return Object.keys(modeMetadata).length > 0 ? modeMetadata : null;
     }
 
@@ -470,6 +487,7 @@ export class PipelineRunner {
         : { promptPipeline: { version: "v1" } }),
       ...modeMetadata,
       ...(reviewGraphSource ? { reviewGraphSource } : {}),
+      ...(workspaceMetrics ?? {}),
     };
   }
 
@@ -552,4 +570,47 @@ export class PipelineRunner {
       missingCapabilities: null,
     };
   }
+}
+
+/**
+ * Reassembles a unified-diff string from a DiffMetadataCorpus so the
+ * review-workspace metrics builder (which still expects a unified-diff string)
+ * can derive ReviewDiffSnapshot entries. Hunk-kind snippets already start with
+ * "@@" so they reassemble directly. Files without hunk content (oversized,
+ * binary, or missing patch) contribute only the file header — the workspace UI
+ * degrades gracefully (those files appear without anchors).
+ */
+function reconstructUnifiedDiffFromCorpus(corpus: DiffMetadataCorpus): string {
+  const parts: string[] = [];
+  for (const file of Object.values(corpus.files)) {
+    if (file.isBinary) continue; // binary files have no diff content to render
+
+    const oldPath = file.previousFilePath ?? file.filePath;
+    const newPath = file.filePath;
+    parts.push(`diff --git a/${oldPath} b/${newPath}`);
+
+    if (file.changeType === "added") {
+      parts.push("new file mode 100644");
+      parts.push("--- /dev/null");
+      parts.push(`+++ b/${newPath}`);
+    } else if (file.changeType === "deleted") {
+      parts.push("deleted file mode 100644");
+      parts.push(`--- a/${oldPath}`);
+      parts.push("+++ /dev/null");
+    } else if (file.changeType === "renamed" && file.previousFilePath) {
+      parts.push(`rename from ${file.previousFilePath}`);
+      parts.push(`rename to ${newPath}`);
+      parts.push(`--- a/${oldPath}`);
+      parts.push(`+++ b/${newPath}`);
+    } else {
+      parts.push(`--- a/${oldPath}`);
+      parts.push(`+++ b/${newPath}`);
+    }
+
+    for (const snippet of file.snippets) {
+      if (snippet.kind !== "hunk") continue;
+      parts.push(snippet.content);
+    }
+  }
+  return parts.join("\n");
 }

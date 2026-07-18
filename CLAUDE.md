@@ -62,6 +62,10 @@ Layer 4: src/app/api/       — Next.js route handlers
 
 Fire-and-forget: HTTP handler returns the job ID immediately; `PipelineRunner` runs async. Idempotent: one active job per (installation, repo, PR).
 
+### Review workstation
+
+`/reviews/[jobId]` — interactive workstation: video + diff workspace + transcript + constellation map (pixi.js) + draft-comment composer. Viewing stays share-token gated (private repos need valid HMAC `shareToken`; failures → 404). GitHub session (NextAuth, [`src/lib/reviewAuth.ts`](src/lib/reviewAuth.ts)) only unlocks commenting: `canSyncDrafts` = reviewer OAuth token can view repo AND `snapshotStatus === "current"`. Freshness fail-closed: head SHA moved or GitHub check fails → `outdated`, sync/submit locked. Draft sync/submit routes (`/api/reviews/[jobId]/draft-comments/{sync,submit}`) use reviewer's OAuth token — not installation token — via optional `IGitHubService` methods (`syncDraftReviewComments`, `submitPendingReview`, `discardPendingReview`). Diff snapshot + scene anchors + pins persisted in `metrics_json` at pipeline completion (`buildPersistedReviewWorkspaceMetrics`; diff reconstructed from corpus hunk snippets). Jobs completed before this feature lack snapshot → empty diff pane until re-run. Dev seeding: `POST /api/dev/reviews/seed` (needs `USE_MOCK_SERVICES=true` or `NODE_ENV=test`). Env: `AUTH_SECRET`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`.
+
 ### Auth
 
 API keys are `keyId.secret`, Argon2id-hashed with `APP_ENCRYPTION_KEY` pepper. Middleware tiers: `withBaseAuth` → `withJobsAuth` (admin + trial) → `withJobsReadAuth` (allows consumed keys for polling) → `withAdminAuth`. `/api/jobs` requires `isAdmin || maxUses !== null`. One-time trial keys claim atomically via `UPDATE … WHERE status='active'`; `releaseOrphanedKeys()` at startup recovers from process crashes. GitHub App: JWT + webhook HMAC-SHA256, installation-scoped.
@@ -104,6 +108,10 @@ Output: model response → Schema validation (L5) → OutputValidator (L6-7) →
 | [`src/lib/apiMiddleware.ts`](src/lib/apiMiddleware.ts) | Auth middleware tiers |
 | [`src/app/api/jobs/route.ts`](src/app/api/jobs/route.ts) | Job creation; handles JSON (5 MB) + `application/x-git-diff` (100 MB) branches |
 | [`src/app/api/webhook/github/route.ts`](src/app/api/webhook/github/route.ts) | GitHub App webhook — installation lifecycle, PR events |
+| [`src/app/reviews/[jobId]/ReviewPageClient.tsx`](src/app/reviews/[jobId]/ReviewPageClient.tsx) | Review workstation client — playback, diff workspace, draft comments |
+| [`src/lib/reviews/loadReviewPage.ts`](src/lib/reviews/loadReviewPage.ts) | Review page loader — share-token viewing gate + session commenting capability |
+| [`src/lib/reviewAuth.ts`](src/lib/reviewAuth.ts) | Scoped NextAuth GitHub session + repo-access checks for draft comments |
+| [`src/lib/reviews/reviewDiffSnapshot.ts`](src/lib/reviews/reviewDiffSnapshot.ts) | Diff snapshot / scene anchor / pin builders persisted to `metrics_json` |
 | [`src/cli/local-test.ts`](src/cli/local-test.ts) | Node CLI; reference implementation for `prvodctl` |
 | [`cli-go/cmd/root.go`](cli-go/cmd/root.go) | Go CLI command surface |
 

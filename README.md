@@ -300,7 +300,13 @@ Poll job status by UUID. Completed jobs always return a freshly signed URL.
 
 ### Review Pages
 
-Completed video jobs can be viewed at `/reviews/:jobId`, a server-rendered page that plays the walkthrough video and lists the scenes with jump-to-timestamp links. The page is open-access — no authentication. For a public share player at `/watch/[jobId]`, links are HMAC-signed with `SHARE_SIGNING_SECRET` so tampered or expired links return a generic "Link Expired" page.
+Completed video jobs open at `/reviews/:jobId` — an interactive review workstation that pairs the walkthrough video with the PR's diff: a file rail, a follow-along transcript, a scene timeline, a constellation map of the changed files, and a per-line draft-comment composer.
+
+**Viewing** is share-token gated: public-repo pages are open-access; private-repo pages require a valid HMAC `shareToken` (signed with `SHARE_SIGNING_SECRET`) and return 404 otherwise. For a public share player at `/watch/[jobId]`, links are HMAC-signed the same way so tampered or expired links return a generic "Link Expired" page.
+
+**Commenting** requires a GitHub sign-in (NextAuth, the same GitHub App's OAuth client). A signed-in reviewer whose token can access the repository can draft inline comments in the diff pane, sync them to GitHub as a *pending* PR review, and submit or discard that review — all with the reviewer's own OAuth token, so comments post under their identity. Sync and submit lock automatically when the PR head has moved past the reviewed snapshot (the page shows an "outdated snapshot" banner). Requires `AUTH_SECRET`, `GITHUB_APP_CLIENT_ID`, and `GITHUB_APP_CLIENT_SECRET`; without them the page still renders read-only.
+
+Walkthroughs generated before this feature landed have no persisted diff snapshot in `metrics_json`, so their diff pane renders empty until the job is re-run.
 
 ### `POST /api/jobs/:id/retry`
 
@@ -464,6 +470,19 @@ Required when using the [GitHub App webhook trigger](#github-app-webhook). Comme
 | `GITHUB_APP_SLUG` | Yes | Your app's slug (e.g. `prvod`). Prevents the bot from triggering itself in comment loops. |
 | `GITHUB_APP_WEBHOOK_SECRET` | Yes | Secret used to validate `X-Hub-Signature-256` on App webhooks. Generate: `openssl rand -hex 32`. |
 | `APP_ENCRYPTION_KEY` | Yes | 32-byte hex pepper for Argon2id API key hashing. Generate: `openssl rand -hex 32`. Changing this invalidates all existing keys. |
+
+</details>
+
+<details>
+<summary><b>Review workstation sign-in (optional)</b></summary>
+
+Only needed to enable draft-comment sync/submit from `/reviews/[jobId]`. Without these, review pages render read-only. Uses the OAuth client of the same GitHub App (App settings → "Client ID" / "Generate a new client secret").
+
+| Variable | Required | Description |
+|---|---|---|
+| `AUTH_SECRET` | For commenting | NextAuth JWT/session encryption secret. Generate: `openssl rand -base64 32`. |
+| `GITHUB_APP_CLIENT_ID` | For commenting | GitHub App OAuth client ID. |
+| `GITHUB_APP_CLIENT_SECRET` | For commenting | GitHub App OAuth client secret. |
 
 </details>
 
