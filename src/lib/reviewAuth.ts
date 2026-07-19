@@ -29,11 +29,25 @@ declare module "@auth/core/jwt" {
   }
 }
 
+/**
+ * True when the GitHub OAuth provider credentials are configured. Mirrors the
+ * STORAGE_URL_SECRET fail-loud convention, adapted for module-load safety:
+ * NextAuth() runs at import time (builds and env-less tests must not crash),
+ * so the check is enforced per-request by the /api/auth/[...nextauth] route
+ * instead of throwing here. Missing env there returns a clear 500 rather than
+ * an opaque OAuth callback failure.
+ */
+export function isReviewOAuthConfigured(): boolean {
+  return Boolean(process.env.GITHUB_APP_CLIENT_ID) && Boolean(process.env.GITHUB_APP_CLIENT_SECRET);
+}
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   trustHost: true,
   debug: process.env.NODE_ENV === "development",
   providers: [
     GitHub({
+      // Empty-string fallbacks keep module load safe when env is absent
+      // (build, tests). isReviewOAuthConfigured() gates every OAuth request.
       clientId: process.env.GITHUB_APP_CLIENT_ID ?? (() => {
         logger.error("GITHUB_APP_CLIENT_ID is not set — OAuth login will fail");
         return "";

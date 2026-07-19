@@ -17,7 +17,7 @@ import {
   createReviewPageMetricEvent,
   emitReviewPageMetric,
 } from "@/lib/reviews/reviewPageMetrics";
-import { submitDraftComments, syncDraftComments } from "@/lib/reviews/reviewDraftSync";
+import { DraftSyncError, submitDraftComments, syncDraftComments } from "@/lib/reviews/reviewDraftSync";
 import { findDiffLineById } from "@/lib/reviews/reviewDiffSnapshot";
 import { DiffWorkspace, type DiffCommentComposer } from "./_components/DiffWorkspace";
 import { FileRail } from "./_components/FileRail";
@@ -50,6 +50,27 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+/**
+ * Maps a draft sync/submit failure to user-facing guidance. Branches on the
+ * server's error code (preserved by DraftSyncError) — most importantly the
+ * 409 OUTDATED_WALKTHROUGH conflict, which is only fixable by regenerating.
+ */
+function describeDraftActionError(err: unknown, fallback: string): string {
+  if (err instanceof DraftSyncError) {
+    if (err.code === "OUTDATED_WALKTHROUGH") {
+      return "This walkthrough no longer matches the pull request. Regenerate the walkthrough, then try again.";
+    }
+    if (err.code === "AUTH_REQUIRED" || err.status === 401) {
+      return "Your GitHub session is no longer valid. Sign in again to continue.";
+    }
+    if (err.code === "AUTH_FORBIDDEN" || err.status === 403) {
+      return "You do not have permission to write review comments for this repository.";
+    }
+    return err.serverMessage ?? fallback;
+  }
+  return fallback;
+}
+
 interface ComposerThreadSelection {
   threadId?: string | null;
   filePath: string;
@@ -75,6 +96,8 @@ export function ReviewPageClient(props: {
   const [isSyncingFileComments, setIsSyncingFileComments] = useState(false);
   const [isSyncingAllComments, setIsSyncingAllComments] = useState(false);
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [mobilePanel, setMobilePanel] = useState<"playback" | "diff">("playback");
   const [isHydrated, setIsHydrated] = useState(false);
   const [theaterMode, setTheaterMode] = useState(() =>
@@ -189,7 +212,14 @@ export function ReviewPageClient(props: {
     return next;
   }, [anchorsById, props.categoryMappingEnabled, props.reviewPage.pins]);
   const allUnsyncedDrafts = useMemo(
-    () => localDrafts.drafts.filter((draft) => draft.status !== "synced" && draft.body.trim().length > 0),
+    () => localDrafts.drafts.filter(
+      (draft) =>
+        draft.status !== "synced"
+        // Unmappable drafts have no diff position in this walkthrough —
+        // re-syncing cannot publish them, so they aren't pending-sync work.
+        && draft.status !== "unmappable"
+        && draft.body.trim().length > 0,
+    ),
     [localDrafts.drafts],
   );
   const allFileThreads = useMemo(
@@ -672,6 +702,7 @@ export function ReviewPageClient(props: {
     } else {
       setIsSyncingAllComments(true);
     }
+    setSyncError(null);
 
     try {
       const result = await syncDraftComments(props.reviewPage.jobId, {
@@ -696,10 +727,17 @@ export function ReviewPageClient(props: {
       } else {
         localDrafts.markSynced(result.syncedDraftIds, result.pendingReviewId);
       }
+      // Drafts the server could not map to a diff position were not sent to
+      // GitHub — give them a distinct visible status instead of leaving them
+      // looking merely "Local".
+      localDrafts.markUnmappable(result.skippedDraftIds ?? []);
     } catch (err) {
       if (allActiveDrafts.length > 0) {
         localDrafts.markSyncFailed(allActiveDrafts.map((draft) => draft.localDraftId));
       }
+      // Covers the discard-only path too (no drafts to flag): the banner is
+      // the only signal that the orphaned pending review was NOT cleaned up.
+      setSyncError(describeDraftActionError(err, "Could not sync draft comments to GitHub. Try again."));
       console.error("[ReviewPageClient] Failed to sync draft comments", err);
     } finally {
       if (triggerScope === "file") {
@@ -730,10 +768,14 @@ export function ReviewPageClient(props: {
     }
 
     setIsSubmittingReview(true);
+    setSubmitError(null);
     try {
       await submitDraftComments(props.reviewPage.jobId, { pendingReviewId });
       localDrafts.markSubmitted(pendingReviewId);
     } catch (err) {
+      // Surface the failure — otherwise the user believes the review was
+      // published while the pending review still sits unsubmitted on GitHub.
+      setSubmitError(describeDraftActionError(err, "Could not submit the review to GitHub. Try again."));
       console.error("[ReviewPageClient] Failed to submit review", err);
     } finally {
       setIsSubmittingReview(false);
@@ -909,6 +951,9 @@ export function ReviewPageClient(props: {
                   isSyncingFileComments={isSyncingFileComments}
                   isSyncingAllComments={isSyncingAllComments}
                   isSubmittingReview={isSubmittingReview}
+                  syncError={syncError}
+                  submitError={submitError}
+                  draftRestoreError={localDrafts.restoreError}
                   pendingReviewId={localDrafts.latestPendingReviewId}
                   orphanPendingReviewId={localDrafts.orphanPendingReviewId}
                   onSelectLine={handleSelectLine}
@@ -1127,6 +1172,9 @@ export function ReviewPageClient(props: {
                               isSyncingFileComments={isSyncingFileComments}
                               isSyncingAllComments={isSyncingAllComments}
                               isSubmittingReview={isSubmittingReview}
+                              syncError={syncError}
+                              submitError={submitError}
+                              draftRestoreError={localDrafts.restoreError}
                               pendingReviewId={localDrafts.latestPendingReviewId}
                               orphanPendingReviewId={localDrafts.orphanPendingReviewId}
                               fillHeight
@@ -1222,6 +1270,9 @@ export function ReviewPageClient(props: {
                 composer={diffComposer}
                 isSyncingFileComments={isSyncingFileComments}
                 isSyncingAllComments={isSyncingAllComments}
+                syncError={syncError}
+                submitError={submitError}
+                draftRestoreError={localDrafts.restoreError}
                 fillHeight
                 detachedMode
                 onSelectLine={handleSelectLine}

@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { buildGitHubDraftComments } from "@/lib/reviews/reviewDraftSync";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  DraftSyncError,
+  buildGitHubDraftComments,
+  submitDraftComments,
+  syncDraftComments,
+} from "@/lib/reviews/reviewDraftSync";
 import type { ReviewPageModel } from "@/domain/entities/ReviewPage";
 import { makeReviewDiffSnapshot } from "../../../integration/helpers/reviewWorkspaceFixtures";
 
@@ -155,5 +160,72 @@ describe("buildGitHubDraftComments", () => {
     ]);
 
     expect(result.map((c) => c.localDraftId)).toEqual(["d-exact", "d-explicit"]);
+  });
+});
+
+describe("syncDraftComments / submitDraftComments error channel", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("throws DraftSyncError preserving status, code, and server message on sync failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: "OUTDATED_WALKTHROUGH",
+            message: "Regenerate the walkthrough before syncing drafts",
+          }),
+          { status: 409 },
+        ),
+      ),
+    );
+
+    const err = await syncDraftComments("job-1", { drafts: [] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DraftSyncError);
+    const typed = err as DraftSyncError;
+    expect(typed.status).toBe(409);
+    expect(typed.code).toBe("OUTDATED_WALKTHROUGH");
+    expect(typed.serverMessage).toBe("Regenerate the walkthrough before syncing drafts");
+    expect(typed.message).toBe("Regenerate the walkthrough before syncing drafts");
+  });
+
+  it("throws DraftSyncError with null code when the error body is not JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("<html>bad gateway</html>", { status: 502 })),
+    );
+
+    const err = await submitDraftComments("job-1", { pendingReviewId: 1 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DraftSyncError);
+    const typed = err as DraftSyncError;
+    expect(typed.status).toBe(502);
+    expect(typed.code).toBeNull();
+    expect(typed.serverMessage).toBeNull();
+    expect(typed.message).toContain("submitDraftComments failed with status 502");
+  });
+
+  it("returns the parsed response including skippedDraftIds on success", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            pendingReviewId: 9,
+            commentCount: 1,
+            syncedDraftIds: ["d1"],
+            skippedDraftIds: ["d2"],
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const result = await syncDraftComments("job-1", { drafts: [] });
+    expect(result.pendingReviewId).toBe(9);
+    expect(result.syncedDraftIds).toEqual(["d1"]);
+    expect(result.skippedDraftIds).toEqual(["d2"]);
   });
 });

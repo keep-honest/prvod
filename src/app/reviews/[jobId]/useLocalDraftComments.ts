@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReviewDiffLine } from "@/domain/entities/ReviewDiffSnapshot";
 
-export type LocalDraftStatus = "local" | "sync_failed" | "synced" | "submitted";
+export type LocalDraftStatus = "local" | "sync_failed" | "unmappable" | "synced" | "submitted";
 export type LocalDraftSource = "manual";
 export type LocalDraftKind = "line" | "range";
 
@@ -44,6 +44,10 @@ export interface SaveLocalDraftThreadInput {
 
 function storageKey(jobId: string, reviewerKey: string): string {
   return `prvod:review-drafts:${jobId}:${reviewerKey}`;
+}
+
+function backupStorageKey(jobId: string, reviewerKey: string): string {
+  return `${storageKey(jobId, reviewerKey)}:backup`;
 }
 
 function createThreadId(startLineId: string): string {
@@ -95,19 +99,31 @@ export function useLocalDraftComments(args: {
   // Tracks a remote pending review whose comments no longer match local state
   // because the user discarded a synced draft. Cleared on successful sync.
   const [orphanPendingReviewId, setOrphanPendingReviewId] = useState<number | null>(null);
+  // True when the persisted blob could not be parsed. The corrupt blob is
+  // preserved under a backup key and the user is told drafts were lost.
+  const [restoreError, setRestoreError] = useState(false);
+  // Storage key whose initial load has been applied to state. The persist
+  // effect must not run before the loaded drafts land in state — otherwise the
+  // first mount persists the initial empty state and clobbers saved drafts.
+  // State (not a ref) so the guard only opens on the post-load render.
+  const [loadedStorageKey, setLoadedStorageKey] = useState<string | null>(null);
 
   useEffect(() => {
     const reviewerKey = args.reviewerKey;
+    setLoadedStorageKey(null);
+    setRestoreError(false);
     if (!reviewerKey || typeof window === "undefined") {
       setDrafts([]);
       setOrphanPendingReviewId(null);
       return;
     }
 
-    const raw = window.localStorage.getItem(storageKey(args.jobId, reviewerKey));
+    const key = storageKey(args.jobId, reviewerKey);
+    const raw = window.localStorage.getItem(key);
     if (!raw) {
       setDrafts([]);
       setOrphanPendingReviewId(null);
+      setLoadedStorageKey(key);
       return;
     }
 
@@ -124,20 +140,29 @@ export function useLocalDraftComments(args: {
       if (Array.isArray(parsed)) {
         setDrafts(parsed.map((draft) => normalizeDraft(draft, args.jobId, reviewerKey)));
         setOrphanPendingReviewId(null);
-        return;
+      } else {
+        setDrafts(
+          (parsed.drafts ?? []).map((draft) => normalizeDraft(draft, args.jobId, reviewerKey)),
+        );
+        setOrphanPendingReviewId(
+          typeof parsed.orphanPendingReviewId === "number" ? parsed.orphanPendingReviewId : null,
+        );
       }
-
-      setDrafts(
-        (parsed.drafts ?? []).map((draft) => normalizeDraft(draft, args.jobId, reviewerKey)),
-      );
-      setOrphanPendingReviewId(
-        typeof parsed.orphanPendingReviewId === "number" ? parsed.orphanPendingReviewId : null,
-      );
     } catch (err) {
       console.warn("[useLocalDraftComments] Failed to parse draft comments from localStorage", err);
+      // Preserve the corrupt blob before resetting so the user's drafts are
+      // recoverable (manually or by a future migration) instead of silently
+      // destroyed, and surface a visible restore-failure state.
+      try {
+        window.localStorage.setItem(backupStorageKey(args.jobId, reviewerKey), raw);
+      } catch (backupErr) {
+        console.warn("[useLocalDraftComments] Failed to back up corrupt draft blob", backupErr);
+      }
       setDrafts([]);
       setOrphanPendingReviewId(null);
+      setRestoreError(true);
     }
+    setLoadedStorageKey(key);
   }, [args.jobId, args.reviewerKey]);
 
   useEffect(() => {
@@ -145,15 +170,23 @@ export function useLocalDraftComments(args: {
       return;
     }
 
+    const key = storageKey(args.jobId, args.reviewerKey);
+    // Skip persisting until the initial load for this key has been applied to
+    // state — prevents the first-mount effect ordering race from clobbering
+    // previously saved drafts with the initial empty state.
+    if (loadedStorageKey !== key) {
+      return;
+    }
+
     try {
       window.localStorage.setItem(
-        storageKey(args.jobId, args.reviewerKey),
+        key,
         JSON.stringify({ drafts, orphanPendingReviewId }),
       );
     } catch (err) {
       console.warn("[useLocalDraftComments] Failed to persist draft comments to localStorage", err);
     }
-  }, [args.jobId, args.reviewerKey, drafts, orphanPendingReviewId]);
+  }, [args.jobId, args.reviewerKey, drafts, orphanPendingReviewId, loadedStorageKey]);
 
   const saveThread = (input: SaveLocalDraftThreadInput) => {
     const reviewerKey = args.reviewerKey;
@@ -268,6 +301,26 @@ export function useLocalDraftComments(args: {
     );
   };
 
+  // The server skipped these drafts during sync: their anchors have overview
+  // precision or their lines are missing from the captured snapshot, so no
+  // GitHub diff position exists in this walkthrough. Distinct from "local"
+  // (never attempted) and "sync_failed" (transport error) — retrying will not
+  // help until the walkthrough is regenerated. Editing the draft resets it to
+  // "local" via updateThreadBody.
+  const markUnmappable = (localDraftIds: string[]) => {
+    if (localDraftIds.length === 0) return;
+    setDrafts((current) =>
+      current.map((draft) =>
+        localDraftIds.includes(draft.localDraftId)
+          ? {
+              ...draft,
+              status: "unmappable",
+              updatedAt: new Date().toISOString(),
+            }
+          : draft),
+    );
+  };
+
   const markPendingReviewDiscarded = (discardedPendingReviewId: number) => {
     // The orphaned pending review was deleted on GitHub. Strip the now-stale
     // pendingReviewId from any drafts that still referenced it so the next
@@ -346,18 +399,25 @@ export function useLocalDraftComments(args: {
 
   const getUnsyncedDraftsForFile = (filePath: string | null) =>
     activeDrafts.filter(
-      (draft) => draft.filePath === filePath && draft.status !== "synced",
+      (draft) =>
+        draft.filePath === filePath
+        // Unmappable drafts have no diff position in this walkthrough — a
+        // retry cannot sync them, so they don't count as pending-sync work.
+        && draft.status !== "synced"
+        && draft.status !== "unmappable",
     );
 
   return {
     drafts: activeDrafts,
     latestPendingReviewId,
     orphanPendingReviewId,
+    restoreError,
     saveThread,
     updateThreadBody,
     discardThread,
     markSynced,
     markSyncFailed,
+    markUnmappable,
     markSubmitted,
     markPendingReviewDiscarded,
     getThreadById,

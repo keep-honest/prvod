@@ -152,6 +152,15 @@ export function buildReviewDiffSnapshot(args: {
 
     if (line.startsWith("@@ ")) {
       flushHunk();
+      // GitHub's legacy review-comment `position` counts every diff line below
+      // the file's FIRST "@@" header — including subsequent hunk header lines:
+      // "The position in the diff continues to increase through lines of
+      // whitespace and additional hunks until the beginning of a new file."
+      // The first header is the origin (line below it is position 1) and is
+      // not counted; every later header consumes one position slot.
+      if (currentFile.hunks.length > 0) {
+        currentFile.filePosition += 1;
+      }
       const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
       const oldStart = match ? Number.parseInt(match[1], 10) : 0;
       const newStart = match ? Number.parseInt(match[2], 10) : 0;

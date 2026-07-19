@@ -43,6 +43,13 @@ export interface SyncDraftCommentsResponse {
   pendingReviewId: number | null;
   commentCount: number;
   syncedDraftIds: string[];
+  /**
+   * Drafts the server could not map to a diff position (overview-precision
+   * anchors, or lines missing from the captured snapshot). They were NOT sent
+   * to GitHub — the client must surface them distinctly instead of leaving
+   * them looking merely "local".
+   */
+  skippedDraftIds?: string[];
   discardedPendingReviewId?: number | null;
 }
 
@@ -101,6 +108,42 @@ export function buildGitHubDraftComments(
   return result;
 }
 
+/**
+ * Typed transport error for the draft-comment API routes. Preserves the HTTP
+ * status and the server's { error, message } JSON body so callers can branch
+ * per error code (e.g. 409 OUTDATED_WALKTHROUGH → "regenerate" guidance)
+ * instead of pattern-matching an opaque response.text() string.
+ */
+export class DraftSyncError extends Error {
+  readonly status: number;
+  /** Machine-readable server error code (e.g. "OUTDATED_WALKTHROUGH"), if any. */
+  readonly code: string | null;
+  /** Human-readable message from the server body, if any. */
+  readonly serverMessage: string | null;
+
+  constructor(args: { operation: string; status: number; code: string | null; serverMessage: string | null }) {
+    super(args.serverMessage ?? `${args.operation} failed with status ${args.status}`);
+    this.name = "DraftSyncError";
+    this.status = args.status;
+    this.code = args.code;
+    this.serverMessage = args.serverMessage;
+  }
+}
+
+async function throwDraftSyncError(operation: string, response: Response): Promise<never> {
+  let code: string | null = null;
+  let serverMessage: string | null = null;
+  try {
+    const body = await response.json() as { error?: unknown; message?: unknown };
+    code = typeof body.error === "string" ? body.error : null;
+    serverMessage = typeof body.message === "string" ? body.message : null;
+  } catch {
+    // Non-JSON error body (proxy/edge failure) — status alone still lets
+    // callers distinguish auth vs conflict vs server error.
+  }
+  throw new DraftSyncError({ operation, status: response.status, code, serverMessage });
+}
+
 export async function syncDraftComments(
   jobId: string,
   request: SyncDraftCommentsRequest,
@@ -112,7 +155,7 @@ export async function syncDraftComments(
   });
 
   if (!response.ok) {
-    throw new Error(await response.text());
+    await throwDraftSyncError("syncDraftComments", response);
   }
 
   try {
@@ -133,7 +176,7 @@ export async function submitDraftComments(
   });
 
   if (!response.ok) {
-    throw new Error(await response.text());
+    await throwDraftSyncError("submitDraftComments", response);
   }
 
   try {

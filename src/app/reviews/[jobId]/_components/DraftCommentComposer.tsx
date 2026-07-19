@@ -6,6 +6,8 @@ function statusLabel(status: LocalDraftComment["status"]): string {
   switch (status) {
     case "sync_failed":
       return "Sync failed";
+    case "unmappable":
+      return "No diff position in this walkthrough";
     case "synced":
       return "Synced";
     case "submitted":

@@ -92,6 +92,8 @@ function statusLabel(status: LocalDraftComment["status"]): string {
   switch (status) {
     case "sync_failed":
       return "Sync failed";
+    case "unmappable":
+      return "No diff position in this walkthrough";
     case "synced":
       return "Synced";
     case "submitted":
@@ -120,6 +122,12 @@ export function DiffWorkspace(props: {
   isSyncingFileComments?: boolean;
   isSyncingAllComments?: boolean;
   isSubmittingReview?: boolean;
+  /** Last sync failure, surfaced next to the sync controls. Null when clear. */
+  syncError?: string | null;
+  /** Last submit failure, surfaced next to the submit control. Null when clear. */
+  submitError?: string | null;
+  /** True when locally saved drafts could not be restored from storage. */
+  draftRestoreError?: boolean;
   pendingReviewId?: number | null;
   orphanPendingReviewId?: number | null;
   detachedMode?: boolean;
@@ -323,6 +331,23 @@ export function DiffWorkspace(props: {
           </div>
         </div>
       </div>
+
+      {props.syncError || props.submitError || props.draftRestoreError ? (
+        <div
+          data-testid="diff-workspace-errors"
+          className="space-y-1 border-b border-[#f85149]/40 bg-[#3d1d20] px-4 py-2 text-xs text-[#ffa198]"
+          role="alert"
+        >
+          {props.draftRestoreError ? (
+            <p data-testid="diff-draft-restore-error">
+              Your saved drafts could not be restored. A backup of the raw data
+              was kept in this browser&apos;s storage.
+            </p>
+          ) : null}
+          {props.syncError ? <p data-testid="diff-sync-error">{props.syncError}</p> : null}
+          {props.submitError ? <p data-testid="diff-submit-error">{props.submitError}</p> : null}
+        </div>
+      ) : null}
 
       <div className={`px-3 py-3 ${props.fillHeight ? "flex min-h-0 flex-1 flex-col" : ""}`}>
         <div

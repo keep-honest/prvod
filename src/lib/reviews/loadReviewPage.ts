@@ -82,28 +82,15 @@ export async function loadReviewPage(args: {
       tokenPayload !== null && tokenPayload.jobId === jobId && tokenPayload.type === "full";
 
     if (!shareTokenValid) {
-      // Detect "session present but accessToken missing" before falling
-      // through to a bare 404. This happens when the OAuth refresh failed,
-      // the token was stripped from the JWT, or the session was scoped
-      // without `repo` — the user just needs to re-authenticate.
-      if (session?.user?.githubLogin && !session.accessToken) {
-        logger.warn("Session present without GitHub access token — prompting re-auth", {
-          jobId,
-          githubLogin: session.user.githubLogin,
-          errorTag: "REVIEW_SESSION_MISSING_ACCESS_TOKEN",
-        });
-        return {
-          ok: false,
-          status: 401,
-          error: "AUTH_REQUIRED",
-          message: "Your GitHub session is missing repository permissions. Sign in again to continue.",
-        };
-      }
-
       if (session?.accessToken) {
         sessionRepoAccess = await canWriteReviewComments(session.accessToken, job.repoFullName);
       }
 
+      // Every failure mode without a valid share token collapses to 404 — a
+      // 401/403 (or the re-auth prompt below) would confirm the private job's
+      // existence to anyone holding a session, tokenless or not. That includes
+      // the "session present but accessToken missing" case: broken sessions
+      // are indistinguishable from probing without leaking existence.
       if (!sessionRepoAccess?.allowed) {
         logger.debug("Private-repo review blocked: no valid share token or verified repo access", {
           jobId,
@@ -117,6 +104,23 @@ export async function loadReviewPage(args: {
           message: "Review page not found",
         };
       }
+    } else if (session?.user?.githubLogin && !session.accessToken) {
+      // The valid share token already proves the job's existence, so it is
+      // safe to explain WHY commenting won't work: the session lost its
+      // GitHub access token (OAuth refresh failed, token stripped from the
+      // JWT, or scoped without `repo`). Prompt a re-auth that preserves the
+      // share token instead of silently degrading to view-only.
+      logger.warn("Session present without GitHub access token — prompting re-auth", {
+        jobId,
+        githubLogin: session.user.githubLogin,
+        errorTag: "REVIEW_SESSION_MISSING_ACCESS_TOKEN",
+      });
+      return {
+        ok: false,
+        status: 401,
+        error: "AUTH_REQUIRED",
+        message: "Your GitHub session is missing repository permissions. Sign in again to continue.",
+      };
     }
   }
 

@@ -276,7 +276,11 @@ describe("loadReviewPage GitHub session (commenting credential)", () => {
     expect(result).toMatchObject({ ok: false, status: 404, error: "NOT_FOUND" });
   });
 
-  it("private repo + no token + session missing accessToken: returns 401 re-auth", async () => {
+  it("private repo + no token + session missing accessToken: collapses to 404 (no existence leak)", async () => {
+    // A 401 here would confirm the private job's existence to any
+    // tokenless-session holder — broken sessions must be indistinguishable
+    // from probing. The re-auth prompt is reserved for requests that already
+    // proved existence with a valid share token.
     const job = buildJob({ repoIsPrivate: true });
     const { container } = buildContainer(job);
     const result = await loadReviewPage({
@@ -284,12 +288,15 @@ describe("loadReviewPage GitHub session (commenting credential)", () => {
       container,
       session: buildSession({ accessToken: undefined }),
     });
-    expect(result).toMatchObject({ ok: false, status: 401, error: "AUTH_REQUIRED" });
+    expect(result).toMatchObject({ ok: false, status: 404, error: "NOT_FOUND" });
   });
 
-  it("private repo + valid token + session missing accessToken: share token still grants viewing", async () => {
+  it("private repo + valid token + session missing accessToken: returns 401 re-auth (existence already proven)", async () => {
+    // The valid share token proves the job exists, so it is safe to explain
+    // that the GitHub session lost its access token and prompt a re-auth
+    // (which preserves the share token through the OAuth round trip).
     const job = buildJob({ repoIsPrivate: true });
-    const { container, build } = buildContainer(job);
+    const { container } = buildContainer(job);
     const token = signToken(
       { jobId: VALID_UUID, type: "full", exp: Math.floor(Date.now() / 1000) + 3600 },
       TEST_SECRET,
@@ -300,12 +307,27 @@ describe("loadReviewPage GitHub session (commenting credential)", () => {
       container,
       session: buildSession({ accessToken: undefined }),
     });
+    expect(result).toMatchObject({ ok: false, status: 401, error: "AUTH_REQUIRED" });
+  });
+
+  it("private repo + valid token + anonymous (no session): share token grants viewing", async () => {
+    const job = buildJob({ repoIsPrivate: true });
+    const { container, build } = buildContainer(job);
+    const token = signToken(
+      { jobId: VALID_UUID, type: "full", exp: Math.floor(Date.now() / 1000) + 3600 },
+      TEST_SECRET,
+    );
+    const result = await loadReviewPage({
+      jobId: VALID_UUID,
+      shareToken: token,
+      container,
+    });
     expect(result.ok).toBe(true);
     expect(build).toHaveBeenCalledWith(
       job,
       expect.anything(),
       expect.anything(),
-      { snapshotStatus: "current", canSyncDrafts: false, reviewerKey: "octocat" },
+      { snapshotStatus: "current", canSyncDrafts: false, reviewerKey: null },
     );
   });
 

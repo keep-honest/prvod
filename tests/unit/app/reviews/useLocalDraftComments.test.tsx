@@ -467,4 +467,115 @@ describe("useLocalDraftComments", () => {
 
     expect(latestHook?.orphanPendingReviewId).toBeNull();
   });
+
+  it("preserves a corrupt storage blob under a backup key and surfaces restoreError", async () => {
+    const storageKey = "prvod:review-drafts:job-123:octocat";
+    const corruptBlob = "{\"drafts\": [not-valid-json";
+    window.localStorage.setItem(storageKey, corruptBlob);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<Harness reviewerKey="octocat" />);
+    });
+
+    // Drafts reset, but the raw blob is kept for recovery and the failure is
+    // visible instead of silent.
+    expect(latestHook?.drafts).toEqual([]);
+    expect(latestHook?.restoreError).toBe(true);
+    expect(window.localStorage.getItem(`${storageKey}:backup`)).toBe(corruptBlob);
+  });
+
+  it("does not clobber previously saved drafts with the initial empty state on mount", async () => {
+    const storageKey = "prvod:review-drafts:job-123:octocat";
+    window.localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        drafts: [{
+          localDraftId: "t1",
+          threadId: "t1",
+          filePath: "src/app/page.tsx",
+          startLineId: sampleLine.lineId,
+          endLineId: sampleLine.lineId,
+          lineIds: [sampleLine.lineId],
+          body: "Existing saved draft.",
+          status: "local",
+        }],
+        orphanPendingReviewId: null,
+      }),
+    );
+
+    // Track every write to the main key: the persist effect must never write
+    // an empty draft list before the initial load has been applied to state.
+    const writes: string[] = [];
+    const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+    window.localStorage.setItem = (key: string, value: string) => {
+      if (key === storageKey) {
+        writes.push(value);
+      }
+      originalSetItem(key, value);
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<Harness reviewerKey="octocat" />);
+    });
+
+    expect(latestHook?.drafts).toHaveLength(1);
+    expect(latestHook?.drafts[0]?.body).toBe("Existing saved draft.");
+    for (const write of writes) {
+      expect(JSON.parse(write).drafts).toHaveLength(1);
+    }
+    const persisted = JSON.parse(window.localStorage.getItem(storageKey) ?? "{}") as {
+      drafts: Array<{ body: string }>;
+    };
+    expect(persisted.drafts).toHaveLength(1);
+    expect(persisted.drafts[0]?.body).toBe("Existing saved draft.");
+  });
+
+  it("marks server-skipped drafts as unmappable and excludes them from unsynced counts", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<Harness reviewerKey="octocat" />);
+    });
+
+    await act(async () => {
+      latestHook?.saveThread({
+        source: "manual",
+        kind: "line",
+        filePath: "src/app/page.tsx",
+        startLine: sampleLine,
+        lineIds: [sampleLine.lineId],
+        anchorIds: [],
+        pinIds: [],
+        body: "No diff position available.",
+      });
+    });
+
+    const localDraftId = latestHook?.drafts[0]?.localDraftId ?? "";
+    await act(async () => {
+      latestHook?.markUnmappable([localDraftId]);
+    });
+
+    expect(latestHook?.drafts[0]?.status).toBe("unmappable");
+    // The draft stays visible but no longer counts as pending-sync work —
+    // re-syncing cannot publish it in this walkthrough.
+    expect(latestHook?.getUnsyncedDraftsForFile("src/app/page.tsx")).toEqual([]);
+
+    // Editing the body re-arms it for sync.
+    const threadId = latestHook?.drafts[0]?.threadId ?? "";
+    await act(async () => {
+      latestHook?.updateThreadBody(threadId, "Edited to retry.");
+    });
+    expect(latestHook?.drafts[0]?.status).toBe("local");
+    expect(latestHook?.getUnsyncedDraftsForFile("src/app/page.tsx")).toHaveLength(1);
+  });
 });

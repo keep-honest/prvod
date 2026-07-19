@@ -18,6 +18,7 @@ import { DiffCorpusBuilder } from "@/domain/services/DiffCorpusBuilder";
 import { createLogger } from "@/lib/logger";
 import { createDiffJobTimeout } from "@/lib/diff-job-timeout";
 import { buildPersistedReviewWorkspaceMetrics } from "@/lib/reviews/reviewDiffSnapshot";
+import type { PersistedReviewWorkspaceMetrics } from "@/domain/entities/ReviewDiffSnapshot";
 import { DiffTooLargeError, DiffFetchTimeoutError, DiffParseError } from "@/lib/diff-errors";
 import type { VideoScript } from "@/domain/entities/VideoScript";
 import type { PromptPipelineV2Artifacts } from "@/domain/entities/PromptPipelineV2";
@@ -192,6 +193,7 @@ export class PipelineRunner {
     const existingJob = await this.jobRepository.findById(jobId);
     const existingMetrics = existingJob?.metricsJson as Record<string, unknown> | null;
     const existingReviewGraphSource = parseReviewGraphSource(existingMetrics?.reviewGraphSource);
+    const existingWorkspaceMetrics = extractPersistedReviewWorkspaceMetrics(existingMetrics);
     const existingDurationMode = (existingMetrics?.durationMode as string) ?? undefined;
     const logger = createLogger(jobId);
     logger.info("Retrying job from checkpoint", { jobId });
@@ -220,7 +222,7 @@ export class PipelineRunner {
       const result = await orchestrator.resume(jobId);
       let metrics = await this.buildCompletionMetrics(
         jobId, result.script, checkpoint?.prContext, existingJob?.githubInstallationId ?? undefined,
-        result.promptPipelineV2, existingReviewGraphSource, retryCorpus,
+        result.promptPipelineV2, existingReviewGraphSource, retryCorpus, existingWorkspaceMetrics,
       );
       metrics = this.mergeMetricsField(metrics, "durationMode", existingDurationMode);
       metrics = this.mergeMetricsField(metrics, "sceneTimeline", result.sceneTimelineFrames);
@@ -302,11 +304,12 @@ export class PipelineRunner {
     promptPipelineV2?: PromptPipelineV2Artifacts,
     reviewGraphFallback?: ReviewGraphSource,
     corpus?: DiffMetadataCorpus,
+    workspaceFallback?: PersistedReviewWorkspaceMetrics,
   ): Promise<Record<string, unknown> | null> {
     const reviewGraphSource = await this.captureReviewGraphSource(
       jobId, script, prContext, installationId, reviewGraphFallback,
     );
-    return this.buildMetrics(script, prContext, promptPipelineV2, reviewGraphSource, corpus);
+    return this.buildMetrics(jobId, script, prContext, promptPipelineV2, reviewGraphSource, corpus, workspaceFallback);
   }
 
   private mergeMetricsField(
@@ -418,11 +421,13 @@ export class PipelineRunner {
   }
 
   private buildMetrics(
+    jobId: string,
     script: VideoScript,
     prContext?: PRContext,
     promptPipelineV2?: PromptPipelineV2Artifacts,
     reviewGraphSource?: ReviewGraphSource,
     corpus?: DiffMetadataCorpus,
+    workspaceFallback?: PersistedReviewWorkspaceMetrics,
   ): Record<string, unknown> | null {
     const modeMetadata = {
       ...(prContext?.durationMode && prContext.durationMode !== "default"
@@ -436,16 +441,40 @@ export class PipelineRunner {
     // Hunk-kind snippets already start with "@@" so they reassemble into a parseable
     // unified diff. Files without hunk snippets (oversized/binary) contribute only a
     // header — the workspace UI degrades gracefully (no anchors for those files).
-    const reconstructedDiff = corpus ? reconstructUnifiedDiffFromCorpus(corpus) : "";
-    const workspaceMetrics = prContext
-      ? buildPersistedReviewWorkspaceMetrics({
-          diff: reconstructedDiff,
-          headSha: prContext.headSha || prContext.headBranch,
-          headRepoFullName: prContext.headRepoFullName ?? prContext.repoFullName,
-          script,
-          promptPipelineV2,
-        })
-      : null;
+    //
+    // Guarded like captureReviewGraphSource: a failure here (e.g. malformed V2
+    // artifacts on a checkpoint) must never fail an already-completed video job.
+    // The review page degrades gracefully when workspace metrics are absent.
+    let workspaceMetrics: PersistedReviewWorkspaceMetrics | null = null;
+    try {
+      const reconstructedDiff = corpus ? reconstructUnifiedDiffFromCorpus(corpus) : "";
+      workspaceMetrics = prContext
+        ? buildPersistedReviewWorkspaceMetrics({
+            diff: reconstructedDiff,
+            headSha: prContext.headSha || prContext.headBranch,
+            headRepoFullName: prContext.headRepoFullName ?? prContext.repoFullName,
+            script,
+            promptPipelineV2,
+          })
+        : null;
+    } catch (error) {
+      createLogger(jobId).warn("review workspace metrics build failed — completing job without diff workspace", {
+        repo: prContext?.repoFullName,
+        hasCorpus: Boolean(corpus),
+        error: error instanceof Error ? error.message : String(error),
+      });
+      workspaceMetrics = null;
+    }
+
+    // Retry path: VideoOrchestrator re-saves checkpoints after step 2 without
+    // diffCorpus, so a retried job usually has no corpus. Never overwrite a
+    // previously-populated workspace (snapshot/anchors/pins) with an empty one —
+    // fall back to the persisted fields, mirroring existingReviewGraphSource.
+    const fallbackFileCount = workspaceFallback?.reviewDiffSnapshot?.totalFiles ?? 0;
+    const builtFileCount = workspaceMetrics?.reviewDiffSnapshot?.totalFiles ?? 0;
+    if (workspaceFallback && fallbackFileCount > 0 && builtFileCount === 0) {
+      workspaceMetrics = workspaceFallback;
+    }
 
     if (!promptPipelineV2 && !reviewGraphSource && !workspaceMetrics) {
       return Object.keys(modeMetadata).length > 0 ? modeMetadata : null;
@@ -580,6 +609,37 @@ export class PipelineRunner {
  * binary, or missing patch) contribute only the file header — the workspace UI
  * degrades gracefully (those files appear without anchors).
  */
+/**
+ * Extracts previously-persisted review-workspace fields from a job's
+ * metricsJson so a retry can fall back to them when the checkpoint no longer
+ * carries a diff corpus. Light structural check only — the fields were written
+ * by buildPersistedReviewWorkspaceMetrics, so a well-formed snapshot object
+ * with a files array is sufficient evidence of provenance.
+ */
+function extractPersistedReviewWorkspaceMetrics(
+  metrics: Record<string, unknown> | null,
+): PersistedReviewWorkspaceMetrics | undefined {
+  if (!metrics) return undefined;
+  const snapshot = metrics.reviewDiffSnapshot;
+  if (
+    typeof snapshot !== "object"
+    || snapshot === null
+    || !Array.isArray((snapshot as { files?: unknown }).files)
+    || typeof (snapshot as { totalFiles?: unknown }).totalFiles !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    reviewDiffSnapshot: snapshot as PersistedReviewWorkspaceMetrics["reviewDiffSnapshot"],
+    sceneDiffAnchors: Array.isArray(metrics.sceneDiffAnchors)
+      ? metrics.sceneDiffAnchors as PersistedReviewWorkspaceMetrics["sceneDiffAnchors"]
+      : [],
+    reviewPins: Array.isArray(metrics.reviewPins)
+      ? metrics.reviewPins as PersistedReviewWorkspaceMetrics["reviewPins"]
+      : [],
+  };
+}
+
 function reconstructUnifiedDiffFromCorpus(corpus: DiffMetadataCorpus): string {
   const parts: string[] = [];
   for (const file of Object.values(corpus.files)) {

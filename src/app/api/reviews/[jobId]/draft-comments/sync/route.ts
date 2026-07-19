@@ -78,7 +78,9 @@ export async function POST(
       .filter((id) => !mappedIds.has(id));
 
     if (skippedDraftIds.length > 0) {
-      logger.debug("Some draft comments skipped — overview precision or missing diff position", {
+      // Warn, not debug: these drafts silently never reach GitHub. The ids are
+      // also returned to the client so the UI can mark them distinctly.
+      logger.warn("Some draft comments skipped — overview precision or missing diff position", {
         jobId,
         skippedCount: skippedDraftIds.length,
         skippedDraftIds,
@@ -112,6 +114,7 @@ export async function POST(
         pendingReviewId: null,
         commentCount: 0,
         syncedDraftIds: [],
+        skippedDraftIds,
         discardedPendingReviewId: body.pendingReviewId,
       });
     }
@@ -147,6 +150,7 @@ export async function POST(
       pendingReviewId: result.pendingReviewId,
       commentCount: result.commentCount,
       syncedDraftIds: comments.map((comment) => comment.localDraftId),
+      skippedDraftIds,
     });
   } catch (err) {
     logger.error("Failed to sync draft review comments", {

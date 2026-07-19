@@ -56,6 +56,70 @@ diff --git a/src/a/b.ts b/src/a/b.ts
     expect(snapshot.files[0].oldPath).toBe("a/internal.ts");
   });
 
+  it("counts subsequent hunk headers in GitHub position math (multi-hunk file)", () => {
+    // GitHub's legacy review-comment `position` counts every line below the
+    // file's FIRST @@ header, INCLUDING later hunk header lines: "The position
+    // in the diff continues to increase through lines of whitespace and
+    // additional hunks until the beginning of a new file." A comment placed
+    // with an off-by-one position lands on the wrong line (or 422s).
+    const diff = [
+      "diff --git a/src/two-hunks.ts b/src/two-hunks.ts",
+      "--- a/src/two-hunks.ts",
+      "+++ b/src/two-hunks.ts",
+      "@@ -1,3 +1,3 @@", // first header: not counted; next line is position 1
+      " context-a", //      position 1
+      "-old-line", //       position 2
+      "+new-line", //       position 3
+      "@@ -10,3 +10,4 @@", // second header: occupies position 4
+      " context-b", //      position 5
+      "+added-line", //     position 6
+      " context-c", //      position 7
+      "@@ -30,1 +31,2 @@", // third header: occupies position 8
+      "+tail-line", //      position 9
+      " context-d", //      position 10
+    ].join("\n");
+
+    const snapshot = buildReviewDiffSnapshot({ diff, headSha: "h", headRepoFullName: "o/r" });
+    expect(snapshot.files).toHaveLength(1);
+    const [first, second, third] = snapshot.files[0].hunks;
+
+    expect(first.lines.map((line) => line.position)).toEqual([1, 2, 3]);
+    // Absolute positions in the second hunk must account for its @@ line.
+    expect(second.lines.map((line) => line.position)).toEqual([5, 6, 7]);
+    expect(second.lines.map((line) => line.text)).toEqual([
+      "context-b",
+      "added-line",
+      "context-c",
+    ]);
+    expect(third.lines.map((line) => line.position)).toEqual([9, 10]);
+
+    // Line numbers stay driven by the hunk headers, independent of position.
+    expect(second.lines[1].newLineNumber).toBe(11);
+    expect(third.lines[0].newLineNumber).toBe(31);
+  });
+
+  it("restarts position counting for each file in a multi-file diff", () => {
+    const diff = [
+      "diff --git a/first.ts b/first.ts",
+      "--- a/first.ts",
+      "+++ b/first.ts",
+      "@@ -1,1 +1,1 @@",
+      "-a", // position 1
+      "+b", // position 2
+      "@@ -5,1 +5,1 @@", // position 3
+      "+c", // position 4
+      "diff --git a/second.ts b/second.ts",
+      "--- a/second.ts",
+      "+++ b/second.ts",
+      "@@ -1,1 +1,1 @@",
+      "+x", // position 1 — counter must reset at the new file
+    ].join("\n");
+
+    const snapshot = buildReviewDiffSnapshot({ diff, headSha: "h", headRepoFullName: "o/r" });
+    expect(snapshot.files[0].hunks[1].lines.map((line) => line.position)).toEqual([4]);
+    expect(snapshot.files[1].hunks[0].lines.map((line) => line.position)).toEqual([1]);
+  });
+
   it("keeps deleted-file paths intact when +++ is /dev/null", () => {
     // Deleted files have +++ /dev/null so filePath comes from the diff --git line.
     // The parser must not strip a real `a/` prefix from that capture.
