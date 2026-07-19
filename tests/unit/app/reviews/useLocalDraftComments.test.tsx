@@ -513,24 +513,28 @@ describe("useLocalDraftComments", () => {
 
       expect(latestHook?.restoreError).toBe(true);
       expect(latestHook?.restoreBackupFailed).toBe(true);
-
-      // Saving a draft must not open the gate either: any successful persist
-      // for this key would destroy the unrecovered blob.
-      await act(async () => {
-        latestHook?.saveThread({
-          source: "manual",
-          kind: "line",
-          filePath: "src/app/page.tsx",
-          startLine: sampleLine,
-          lineIds: [sampleLine.lineId],
-          anchorIds: [],
-          pinIds: [],
-          body: "New draft while persistence is paused.",
-        });
-      });
     } finally {
+      // Restore working storage BEFORE mutating drafts: with writes failing
+      // globally the survival assertions below would be tautological. Quota
+      // pressure is transient in production — the gate must hold even once
+      // writes succeed again.
       window.localStorage.setItem = originalSetItem;
     }
+
+    // Saving a draft must not open the gate: a successful persist for this
+    // key would destroy the unrecovered blob.
+    await act(async () => {
+      latestHook?.saveThread({
+        source: "manual",
+        kind: "line",
+        filePath: "src/app/page.tsx",
+        startLine: sampleLine,
+        lineIds: [sampleLine.lineId],
+        anchorIds: [],
+        pinIds: [],
+        body: "New draft while persistence is paused.",
+      });
+    });
 
     expect(window.localStorage.getItem(storageKey)).toBe(corruptBlob);
     expect(window.localStorage.getItem(`${storageKey}:backup`)).toBeNull();
