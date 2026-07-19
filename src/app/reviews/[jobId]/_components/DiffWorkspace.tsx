@@ -128,6 +128,9 @@ export function DiffWorkspace(props: {
   submitError?: string | null;
   /** True when locally saved drafts could not be restored from storage. */
   draftRestoreError?: boolean;
+  /** True when the corrupt-blob backup write also failed — no backup exists
+   * and draft persistence is paused to protect the original data. */
+  draftBackupFailed?: boolean;
   pendingReviewId?: number | null;
   orphanPendingReviewId?: number | null;
   detachedMode?: boolean;
@@ -340,8 +343,9 @@ export function DiffWorkspace(props: {
         >
           {props.draftRestoreError ? (
             <p data-testid="diff-draft-restore-error">
-              Your saved drafts could not be restored. A backup of the raw data
-              was kept in this browser&apos;s storage.
+              {props.draftBackupFailed
+                ? "Your saved drafts could not be restored, and a backup could not be saved. Draft saving is paused to protect the existing data."
+                : "Your saved drafts could not be restored. A backup of the raw data was kept in this browser's storage."}
             </p>
           ) : null}
           {props.syncError ? <p data-testid="diff-sync-error">{props.syncError}</p> : null}

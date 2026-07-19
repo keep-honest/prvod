@@ -485,7 +485,55 @@ describe("useLocalDraftComments", () => {
     // visible instead of silent.
     expect(latestHook?.drafts).toEqual([]);
     expect(latestHook?.restoreError).toBe(true);
+    expect(latestHook?.restoreBackupFailed).toBe(false);
     expect(window.localStorage.getItem(`${storageKey}:backup`)).toBe(corruptBlob);
+  });
+
+  it("keeps the persist gate closed when the corrupt-blob backup write fails", async () => {
+    const storageKey = "prvod:review-drafts:job-123:octocat";
+    const corruptBlob = "{\"drafts\": [not-valid-json";
+    window.localStorage.setItem(storageKey, corruptBlob);
+
+    // Simulate quota pressure: every write after the corrupt seed fails, so
+    // the backup cannot be saved. The corrupt blob at the main key is then
+    // the user's only copy — the persist effect must never overwrite it.
+    const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+    window.localStorage.setItem = () => {
+      throw new DOMException("QuotaExceededError");
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<Harness reviewerKey="octocat" />);
+      });
+
+      expect(latestHook?.restoreError).toBe(true);
+      expect(latestHook?.restoreBackupFailed).toBe(true);
+
+      // Saving a draft must not open the gate either: any successful persist
+      // for this key would destroy the unrecovered blob.
+      await act(async () => {
+        latestHook?.saveThread({
+          source: "manual",
+          kind: "line",
+          filePath: "src/app/page.tsx",
+          startLine: sampleLine,
+          lineIds: [sampleLine.lineId],
+          anchorIds: [],
+          pinIds: [],
+          body: "New draft while persistence is paused.",
+        });
+      });
+    } finally {
+      window.localStorage.setItem = originalSetItem;
+    }
+
+    expect(window.localStorage.getItem(storageKey)).toBe(corruptBlob);
+    expect(window.localStorage.getItem(`${storageKey}:backup`)).toBeNull();
   });
 
   it("does not clobber previously saved drafts with the initial empty state on mount", async () => {

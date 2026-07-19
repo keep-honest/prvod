@@ -954,6 +954,7 @@ export function ReviewPageClient(props: {
                   syncError={syncError}
                   submitError={submitError}
                   draftRestoreError={localDrafts.restoreError}
+                  draftBackupFailed={localDrafts.restoreBackupFailed}
                   pendingReviewId={localDrafts.latestPendingReviewId}
                   orphanPendingReviewId={localDrafts.orphanPendingReviewId}
                   onSelectLine={handleSelectLine}
@@ -1175,6 +1176,7 @@ export function ReviewPageClient(props: {
                               syncError={syncError}
                               submitError={submitError}
                               draftRestoreError={localDrafts.restoreError}
+                              draftBackupFailed={localDrafts.restoreBackupFailed}
                               pendingReviewId={localDrafts.latestPendingReviewId}
                               orphanPendingReviewId={localDrafts.orphanPendingReviewId}
                               fillHeight
@@ -1273,6 +1275,7 @@ export function ReviewPageClient(props: {
                 syncError={syncError}
                 submitError={submitError}
                 draftRestoreError={localDrafts.restoreError}
+                draftBackupFailed={localDrafts.restoreBackupFailed}
                 fillHeight
                 detachedMode
                 onSelectLine={handleSelectLine}

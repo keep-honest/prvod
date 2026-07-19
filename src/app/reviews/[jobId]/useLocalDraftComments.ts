@@ -102,6 +102,11 @@ export function useLocalDraftComments(args: {
   // True when the persisted blob could not be parsed. The corrupt blob is
   // preserved under a backup key and the user is told drafts were lost.
   const [restoreError, setRestoreError] = useState(false);
+  // True when the backup write itself failed (e.g. quota pressure). In that
+  // case the corrupt blob at the main key is the user's only copy, so the
+  // persist gate stays closed for this key and the banner must not claim a
+  // backup exists.
+  const [restoreBackupFailed, setRestoreBackupFailed] = useState(false);
   // Storage key whose initial load has been applied to state. The persist
   // effect must not run before the loaded drafts land in state — otherwise the
   // first mount persists the initial empty state and clobbers saved drafts.
@@ -112,6 +117,7 @@ export function useLocalDraftComments(args: {
     const reviewerKey = args.reviewerKey;
     setLoadedStorageKey(null);
     setRestoreError(false);
+    setRestoreBackupFailed(false);
     if (!reviewerKey || typeof window === "undefined") {
       setDrafts([]);
       setOrphanPendingReviewId(null);
@@ -153,14 +159,23 @@ export function useLocalDraftComments(args: {
       // Preserve the corrupt blob before resetting so the user's drafts are
       // recoverable (manually or by a future migration) instead of silently
       // destroyed, and surface a visible restore-failure state.
+      let backedUp = false;
       try {
         window.localStorage.setItem(backupStorageKey(args.jobId, reviewerKey), raw);
+        backedUp = true;
       } catch (backupErr) {
         console.warn("[useLocalDraftComments] Failed to back up corrupt draft blob", backupErr);
       }
       setDrafts([]);
       setOrphanPendingReviewId(null);
       setRestoreError(true);
+      if (!backedUp) {
+        // The corrupt blob at the main key is the user's only remaining copy.
+        // Leave the persist gate closed so the empty state never overwrites
+        // it — draft persistence stays paused for this key.
+        setRestoreBackupFailed(true);
+        return;
+      }
     }
     setLoadedStorageKey(key);
   }, [args.jobId, args.reviewerKey]);
@@ -412,6 +427,7 @@ export function useLocalDraftComments(args: {
     latestPendingReviewId,
     orphanPendingReviewId,
     restoreError,
+    restoreBackupFailed,
     saveThread,
     updateThreadBody,
     discardThread,
