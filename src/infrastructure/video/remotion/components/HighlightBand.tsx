@@ -63,10 +63,14 @@ export const HighlightBand: React.FC<HighlightBandProps> = ({
   bands.push([bandStart, bandEnd]);
 
   // Fade in/out anchored on startMs/endMs (120ms ramps).
+  // Guard: `interpolate` throws unless the input range is strictly increasing.
+  // TTS can emit zero-duration words (startTimeMs === endTimeMs) — clamp the
+  // end so the four points never collide instead of failing the render.
   const FADE_MS = 120;
+  const safeEndMs = endMs > startMs ? endMs : startMs + 1;
   const opacity = interpolate(
     currentMs,
-    [startMs - FADE_MS, startMs, endMs, endMs + FADE_MS],
+    [startMs - FADE_MS, startMs, safeEndMs, safeEndMs + FADE_MS],
     [0, 1, 1, 0],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: Easing.ease },
   );

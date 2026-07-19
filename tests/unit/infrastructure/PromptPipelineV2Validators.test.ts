@@ -994,5 +994,44 @@ describe("PromptPipelineV2 deterministic validators", () => {
       const result = validateCodeBindings(script as never);
       expect(result.passed).toBe(true);
     });
+
+    it("flags a nested word span (inner span would shadow the outer in the sticky-forward resolver)", () => {
+      const script = makeScript([{
+        codeBindings: [
+          { wordStartIndex: 0, wordEndIndex: 4, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] },
+          { wordStartIndex: 1, wordEndIndex: 2, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] },
+        ],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(false);
+      expect(result.strippedScenes).toEqual([1]);
+      expect(result.violations).toHaveLength(1);
+      expect(result.violations[0].bindingIndex).toBe(1);
+      expect(result.violations[0].reason).toContain("overlaps binding 0");
+    });
+
+    it("flags partially overlapping word spans", () => {
+      const script = makeScript([{
+        codeBindings: [
+          { wordStartIndex: 0, wordEndIndex: 2, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] },
+          { wordStartIndex: 2, wordEndIndex: 4, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] },
+        ],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(false);
+      expect(result.violations[0].reason).toContain("overlaps binding");
+    });
+
+    it("accepts disjoint word spans within a scene", () => {
+      const script = makeScript([{
+        codeBindings: [
+          { wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] },
+          { wordStartIndex: 2, wordEndIndex: 3, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] },
+        ],
+      }]);
+      const result = validateCodeBindings(script as never);
+      expect(result.passed).toBe(true);
+      expect(result.strippedScenes).toEqual([]);
+    });
   });
 });

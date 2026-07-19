@@ -6,7 +6,7 @@ import {
   resolveBindings,
   findActiveBinding,
 } from "@/infrastructure/video/remotion/wordSyncedBindings";
-import { CodeCardLayout } from "@/infrastructure/video/remotion/components/CodeCardLayout";
+import { CodeCardLayout, MAX_VISIBLE_ARROWS } from "@/infrastructure/video/remotion/components/CodeCardLayout";
 import { ConnectionArrow } from "@/infrastructure/video/remotion/components/ConnectionArrow";
 
 interface WordSyncedCodeStageProps {
@@ -27,7 +27,6 @@ const SLOT_COORDS: Record<"active" | "related0" | "related1" | "related2", { cx:
   related1: { cx: 0.82, cy: 0.72 },
   related2: { cx: 0.18, cy: 0.5 },
 };
-const MAX_VISIBLE_ARROWS = 3;
 
 /**
  * Top-level word-synced code stage. Per frame, derives the active binding
@@ -53,7 +52,8 @@ export const WordSyncedCodeStage: React.FC<WordSyncedCodeStageProps> = ({
   const active = findActiveBinding(resolved, currentTimeMs);
 
   // Default: first snippet centered (matches legacy static-overlay behavior).
-  const activeIndex = active?.codeBrollIndex ?? 0;
+  // CodeCardLayout derives the same (activeIndex, relatedIndices) internally
+  // from the resolved timeline; these are only for arrows and highlights.
   const relatedIndices = (active?.relatesToCodeBrollIndices ?? []).slice(0, MAX_VISIBLE_ARROWS);
 
   // Arrows from the active card center to each related card center.
@@ -71,8 +71,7 @@ export const WordSyncedCodeStage: React.FC<WordSyncedCodeStageProps> = ({
     <AbsoluteFill style={{ pointerEvents: "none" }}>
       <CodeCardLayout
         items={scene.codeBroll}
-        activeIndex={activeIndex}
-        relatedIndices={relatedIndices}
+        bindings={resolved}
         startFrame={startFrame}
         durationFrames={durationFrames}
         activeHighlightLines={active?.highlightLines ?? []}

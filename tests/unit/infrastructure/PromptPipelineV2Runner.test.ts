@@ -521,6 +521,73 @@ describe("generateScriptWithPromptPipelineV2", () => {
     expect(completeText).toHaveBeenCalledTimes(1);
   });
 
+  it("strips invalid codeBindings only from the offending scene and warns INVALID_CODE_BINDINGS_STRIPPED once", async () => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const scriptWithBindings = {
+      ...VALID_SCRIPT,
+      scenes: VALID_SCRIPT.scenes.map((scene) => {
+        if (scene.sceneNumber === 2) {
+          // Out-of-range codeBrollIndex → scene 2's bindings must be stripped.
+          return {
+            ...scene,
+            codeBindings: [
+              { wordStartIndex: 0, wordEndIndex: 0, codeBrollIndex: 99, highlightLines: [], relatesToCodeBrollIndices: [] },
+            ],
+          };
+        }
+        if (scene.sceneNumber === 3) {
+          // Valid binding (codeBroll[0] has lineRange [5, 10]) — must survive.
+          return {
+            ...scene,
+            codeBindings: [
+              { wordStartIndex: 0, wordEndIndex: 0, codeBrollIndex: 0, highlightLines: [7], relatesToCodeBrollIndices: [] },
+            ],
+          };
+        }
+        return scene;
+      }),
+    };
+    const model = {
+      family: "claude" as const,
+      completeJson: vi.fn()
+        .mockResolvedValueOnce(makeCoveragePlan())
+        .mockResolvedValueOnce(passingCoverageJudge())
+        .mockResolvedValueOnce(buildValidOutline())
+        .mockResolvedValueOnce(scriptWithBindings)
+        .mockResolvedValueOnce(passingNarrationJudge()),
+    };
+
+    try {
+      const result = await generateScriptWithPromptPipelineV2({
+        model,
+        context: fakePRContext,
+        analysis: fakeDiffAnalysis,
+        validDurations: [4, 6, 8],
+      });
+
+      const scene2 = result.script.scenes.find((s) => s.sceneNumber === 2);
+      const scene3 = result.script.scenes.find((s) => s.sceneNumber === 3);
+      expect(scene2?.codeBindings).toEqual([]);
+      expect(scene3?.codeBindings).toEqual([
+        { wordStartIndex: 0, wordEndIndex: 0, codeBrollIndex: 0, highlightLines: [7], relatesToCodeBrollIndices: [] },
+      ]);
+
+      const strippedWarnings = consoleWarnSpy.mock.calls
+        .map(([msg]) => {
+          try {
+            return JSON.parse(msg as string) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .filter((entry) => entry?.errorTag === "INVALID_CODE_BINDINGS_STRIPPED");
+      expect(strippedWarnings).toHaveLength(1);
+      expect(strippedWarnings[0]?.affectedScenes).toEqual([2]);
+    } finally {
+      consoleWarnSpy.mockRestore();
+    }
+  });
+
   describe("script repair loop (via completeText)", () => {
     const coveragePlan = makeCoveragePlan();
     const outline = buildValidOutline();

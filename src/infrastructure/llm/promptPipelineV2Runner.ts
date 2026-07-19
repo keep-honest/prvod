@@ -1771,9 +1771,10 @@ export async function generateScriptWithPromptPipelineV2(
   script = ensureLastSceneOverview(script);
 
   // Soft-fail validation: strip invalid `codeBindings` per scene + log
-  // a single warning per affected scene. The WordSyncedCodeStage falls
-  // back to heuristic bindings when codeBindings is empty/absent, so a
-  // stripped scene degrades gracefully instead of failing the job.
+  // one aggregated warning listing every affected scene. The
+  // WordSyncedCodeStage falls back to heuristic bindings when codeBindings
+  // is empty/absent, so a stripped scene degrades gracefully instead of
+  // failing the job.
   const codeBindingsValidation = validateCodeBindings(script);
   if (!codeBindingsValidation.passed) {
     const strippedSet = new Set(codeBindingsValidation.strippedScenes);

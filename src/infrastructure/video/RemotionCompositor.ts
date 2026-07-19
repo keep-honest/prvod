@@ -11,6 +11,7 @@ import type {
   CompositionResult,
 } from "@/interfaces/IVideoCompositor";
 import { parseCaptionOffsetMs } from "@/infrastructure/video/ffmpeg/parseCaptionOffsetMs";
+import { isWordSyncedCodeEnabled } from "@/lib/featureFlags";
 import { computeTotalFrames, downloadAsset, cleanupDirs } from "@/infrastructure/video/compositorUtils";
 import {
   resolveRemotionRendererPort,
@@ -298,11 +299,19 @@ export class RemotionCompositor implements IVideoCompositor {
         logger.warn(captionOffsetWarning, { value: rawCaptionOffset });
       }
       logger.debug("Resolved caption offset", { rawEnvValue: rawCaptionOffset ?? "unset", captionOffsetMs });
+      // WORD_SYNCED_CODE must be resolved HERE (server process) and threaded
+      // through inputProps: Root.tsx executes inside the Remotion webpack
+      // bundle (headless Chrome) where custom server env vars are not
+      // injected — reading process.env.WORD_SYNCED_CODE there always yields
+      // undefined and would silently render the legacy overlay.
+      const wordSyncedCodeEnabled = isWordSyncedCodeEnabled();
+      logger.debug("Resolved WORD_SYNCED_CODE flag for render", { wordSyncedCodeEnabled });
       const compositionInputProps = {
         script,
         clipPaths: servedClipPaths,
         sceneTimelineFrames: servedSceneTimelineFrames,
         audioIncluded: audioIncluded ?? false,
+        wordSyncedCodeEnabled,
         ...(graphLayout ? { graphLayout } : {}),
         ...(Number.isFinite(captionOffsetMs) && captionOffsetMs !== 0
           ? { captionOffsetMs }

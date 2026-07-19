@@ -192,7 +192,18 @@ export function buildHeuristicBindings(args: {
   return bindings;
 }
 
-/** Drop bindings that reference invalid indices or word ranges. */
+/**
+ * Drop bindings that reference invalid indices or word ranges, filter
+ * out-of-range `highlightLines`, and enforce word-span disjointness.
+ *
+ * This runs on every resolver path — including ones that bypass the runner's
+ * `validateCodeBindings` (e.g. checkpoint resume of a persisted script) — so
+ * it mirrors the validator's highlightLines range logic and makes overlap
+ * handling deterministic: bindings are sorted by `wordStartIndex` and any
+ * later-starting binding whose span overlaps the previous kept binding is
+ * dropped (a nested span would otherwise permanently shadow the outer one
+ * in the sticky-forward `findActiveBinding`).
+ */
 function sanitizeBindings(
   bindings: CodeBinding[],
   scene: Scene,
@@ -200,18 +211,64 @@ function sanitizeBindings(
 ): CodeBinding[] {
   const cbCount = scene.codeBroll.length;
   const out: CodeBinding[] = [];
+  let filteredHighlightLineCount = 0;
   for (const b of bindings) {
     if (b.codeBrollIndex < 0 || b.codeBrollIndex >= cbCount) continue;
     if (b.wordStartIndex < 0 || b.wordEndIndex < b.wordStartIndex) continue;
     if (b.wordStartIndex >= wordCount) continue;
     // Clamp wordEndIndex to wordCount-1.
     const wordEndIndex = Math.min(b.wordEndIndex, wordCount - 1);
+    // Filter (not drop-the-binding) out-of-range highlightLines, mirroring
+    // validateCodeBindings' range logic. An OOB line that survives here is
+    // silently invisible: HighlightBand's relative-index filter renders
+    // nothing for it on every frame.
+    const target = scene.codeBroll[b.codeBrollIndex];
+    const snippetLineCount = target.code.split("\n").length;
+    const minLine = target.lineRange ? target.lineRange[0] : 1;
+    const maxLine = target.lineRange ? target.lineRange[1] : snippetLineCount;
+    const highlightLines = (b.highlightLines ?? []).filter(
+      (line) => line >= minLine && line <= maxLine,
+    );
+    filteredHighlightLineCount += (b.highlightLines ?? []).length - highlightLines.length;
     // Filter relatesToCodeBrollIndices to valid OTHER indices.
     const relatesTo = (b.relatesToCodeBrollIndices ?? [])
       .filter((idx) => idx >= 0 && idx < cbCount && idx !== b.codeBrollIndex);
-    out.push({ ...b, wordEndIndex, relatesToCodeBrollIndices: relatesTo });
+    out.push({ ...b, wordEndIndex, highlightLines, relatesToCodeBrollIndices: relatesTo });
   }
-  return out;
+
+  if (filteredHighlightLineCount > 0) {
+    logger.warn("Word-synced bindings: filtered out-of-range highlightLines during sanitization", {
+      errorTag: "OOB_HIGHLIGHT_LINES_FILTERED",
+      sceneNumber: scene.sceneNumber,
+      filteredLineCount: filteredHighlightLineCount,
+    });
+  }
+
+  // Enforce span disjointness deterministically: sort by wordStartIndex
+  // (tie-break on wordEndIndex) and drop any binding overlapping the
+  // previous kept one.
+  out.sort(
+    (a, b) => a.wordStartIndex - b.wordStartIndex || a.wordEndIndex - b.wordEndIndex,
+  );
+  const disjoint: CodeBinding[] = [];
+  let droppedOverlapCount = 0;
+  for (const b of out) {
+    const last = disjoint[disjoint.length - 1];
+    if (last && b.wordStartIndex <= last.wordEndIndex) {
+      droppedOverlapCount++;
+      continue;
+    }
+    disjoint.push(b);
+  }
+  if (droppedOverlapCount > 0) {
+    logger.warn("Word-synced bindings: dropped overlapping word spans during sanitization", {
+      errorTag: "OVERLAPPING_CODE_BINDINGS_DROPPED",
+      sceneNumber: scene.sceneNumber,
+      droppedBindingCount: droppedOverlapCount,
+      keptBindingCount: disjoint.length,
+    });
+  }
+  return disjoint;
 }
 
 /**
@@ -222,9 +279,9 @@ function sanitizeBindings(
  * Mixing LLM + heuristic is NOT allowed in the normal flow: if LLM
  * bindings are present, they're used as-is after sanitization. However,
  * when EVERY LLM binding gets stripped by sanitization (stale indices in
- * older persisted scripts, non-V2 ingestion, OOB highlightLines), fall
- * back to heuristic — the alternative is sitting on the default snippet
- * forever, which contradicts the documented malformed-binding fallback.
+ * older persisted scripts, non-V2 ingestion), fall back to heuristic —
+ * the alternative is sitting on the default snippet forever, which
+ * contradicts the documented malformed-binding fallback.
  */
 export function resolveBindings(args: {
   scene: Scene;
@@ -232,6 +289,19 @@ export function resolveBindings(args: {
 }): ResolvedBinding[] {
   const { scene, wordTimings } = args;
   const tokens = tokenizeNarration(scene.narration);
+  // The schema contract declares tokens ↔ wordTimings 1:1 (maintained by the
+  // TTS pipeline's restoreDots*/restoreDataFormatNames*). A mismatch means
+  // bindings past the shorter list get silently truncated below, so surface
+  // it — once per scene, since resolveBindings runs once per (scene,
+  // wordTimings) via the stage's useMemo.
+  if (scene.codeBroll.length > 0 && tokens.length !== wordTimings.length) {
+    logger.warn("Word-synced bindings: narration token count does not match wordTimings count — truncating to the shorter", {
+      errorTag: "WORD_TIMING_TOKEN_COUNT_MISMATCH",
+      sceneNumber: scene.sceneNumber,
+      tokenCount: tokens.length,
+      wordTimingCount: wordTimings.length,
+    });
+  }
   const wordCount = Math.min(tokens.length, wordTimings.length);
   if (wordCount === 0 || scene.codeBroll.length === 0) return [];
 

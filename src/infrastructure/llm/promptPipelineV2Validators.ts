@@ -764,8 +764,9 @@ export interface CodeBindingValidationResult {
  * Soft-fail validator for `codeBindings` on each scene. The bindings are
  * decorative (WordSyncedCodeStage gracefully degrades to heuristic when
  * they're missing/invalid), so this validator never throws — it returns
- * the offending scenes so the caller can strip the bindings and log a
- * single `INVALID_CODE_BINDINGS_STRIPPED` warning per scene.
+ * the offending scenes so the caller can strip the bindings and log one
+ * aggregated `INVALID_CODE_BINDINGS_STRIPPED` warning listing every
+ * affected scene.
  *
  * Per-binding checks:
  *  - `codeBrollIndex < scene.codeBroll.length`
@@ -773,6 +774,12 @@ export interface CodeBindingValidationResult {
  *  - every `highlightLines[i]` within the target snippet's `lineRange`
  *    (or anywhere in `code` line span if `lineRange` is null)
  *  - every `relatesToCodeBrollIndices[i] < scene.codeBroll.length` AND `≠ codeBrollIndex`
+ *
+ * Per-scene check:
+ *  - word spans must be pairwise disjoint. `findActiveBinding` picks the
+ *    rightmost binding whose startMs ≤ t (sticky-forward), so an
+ *    overlapping/nested span would permanently shadow the earlier binding
+ *    once the later one starts.
  */
 export function validateCodeBindings(script: VideoScript): CodeBindingValidationResult {
   const violations: CodeBindingViolation[] = [];
@@ -783,11 +790,13 @@ export function validateCodeBindings(script: VideoScript): CodeBindingValidation
     if (bindings.length === 0) continue;
     const wordCount = countSpokenWords(scene.narration);
     const cbCount = scene.codeBroll.length;
+    const flaggedIndices = new Set<number>();
 
     bindings.forEach((b, bindingIndex) => {
       const pushViolation = (reason: string) => {
         violations.push({ sceneNumber: scene.sceneNumber, bindingIndex, reason });
         strippedScenes.add(scene.sceneNumber);
+        flaggedIndices.add(bindingIndex);
       };
       if (b.codeBrollIndex < 0 || b.codeBrollIndex >= cbCount) {
         pushViolation(`codeBrollIndex ${b.codeBrollIndex} out of range [0, ${cbCount})`);
@@ -824,6 +833,31 @@ export function validateCodeBindings(script: VideoScript): CodeBindingValidation
         return;
       }
     });
+
+    // Span-disjointness check over bindings that passed the per-binding
+    // checks: sort by wordStartIndex and flag any binding whose span starts
+    // inside the previous kept binding's span (overlap or full nesting).
+    const survivors = bindings
+      .map((b, bindingIndex) => ({ b, bindingIndex }))
+      .filter(({ bindingIndex }) => !flaggedIndices.has(bindingIndex))
+      .sort(
+        (x, y) =>
+          x.b.wordStartIndex - y.b.wordStartIndex ||
+          x.b.wordEndIndex - y.b.wordEndIndex,
+      );
+    let lastKept: (typeof survivors)[number] | null = null;
+    for (const entry of survivors) {
+      if (lastKept && entry.b.wordStartIndex <= lastKept.b.wordEndIndex) {
+        violations.push({
+          sceneNumber: scene.sceneNumber,
+          bindingIndex: entry.bindingIndex,
+          reason: `word span [${entry.b.wordStartIndex}, ${entry.b.wordEndIndex}] overlaps binding ${lastKept.bindingIndex} word span [${lastKept.b.wordStartIndex}, ${lastKept.b.wordEndIndex}]`,
+        });
+        strippedScenes.add(scene.sceneNumber);
+        continue;
+      }
+      lastKept = entry;
+    }
   }
 
   return {

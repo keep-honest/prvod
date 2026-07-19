@@ -1,6 +1,7 @@
-import React, { useRef } from "react";
+import React from "react";
 import { useCurrentFrame, useVideoConfig, spring, interpolate } from "remotion";
 import type { CodeBroll } from "@/domain/entities/VideoScript";
+import type { ResolvedBinding } from "@/infrastructure/video/remotion/wordSyncedBindings";
 import {
   getSnippetLineChangeKind,
   getSnippetLineNumbers,
@@ -27,10 +28,19 @@ const RELATED_SLOTS: Slot[] = [
 ];
 const PARKED_SLOT: Slot = { cx: 0.5, cy: 1.15, scale: 0.4, opacity: 0 };
 
+/** Max related cards shown in ring slots (mirrors the arrow cap in WordSyncedCodeStage). */
+export const MAX_VISIBLE_ARROWS = 3;
+
 export interface CodeCardLayoutProps {
   items: CodeBroll[];
-  activeIndex: number;
-  relatedIndices: number[];
+  /**
+   * Full resolved binding timeline for the scene, sorted by startMs.
+   * Slot assignments AND transition anchors are derived from it per frame,
+   * keeping every frame a pure function of (frame, props) — required for
+   * Remotion's concurrent chunked rendering, where cross-frame refs reset
+   * at chunk boundaries.
+   */
+  bindings: ResolvedBinding[];
   /** Anchor frame in the scene timeline. Used for spring transitions. */
   startFrame: number;
   durationFrames: number;
@@ -43,11 +53,46 @@ export interface CodeCardLayoutProps {
 const CARD_LINE_HEIGHT_PX = 22; // matches fontSize 14 + lineHeight 1.6
 const CARD_TOP_PADDING_PX = 56; // file-path header (~20) + padding (~24) + margin (~12)
 
-interface CardSlotState {
-  prev: Slot;
-  current: Slot;
-  /** Frame at which the current slot was assigned (drives spring time). */
-  transitionFrame: number;
+interface SegmentState {
+  activeIndex: number;
+  relatedIndices: number[];
+}
+
+/**
+ * The (activeIndex, relatedIndices) pair is piecewise-constant over time:
+ * `findActiveBinding` is sticky-forward, so it changes only at each binding's
+ * `startMs`. Segment -1 is the pre-first-binding default (first snippet
+ * centered, no related cards), segment j covers [bindings[j].startMs, next).
+ */
+function segmentState(bindings: ResolvedBinding[], segIdx: number): SegmentState {
+  if (segIdx < 0) return { activeIndex: 0, relatedIndices: [] };
+  const b = bindings[segIdx];
+  return {
+    activeIndex: b.codeBrollIndex,
+    relatedIndices: (b.relatesToCodeBrollIndices ?? []).slice(0, MAX_VISIBLE_ARROWS),
+  };
+}
+
+/** Rightmost segment whose startMs <= currentTimeMs; -1 before the first binding. */
+function segmentIndexAt(bindings: ResolvedBinding[], currentTimeMs: number): number {
+  let lo = 0;
+  let hi = bindings.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (bindings[mid].startMs <= currentTimeMs) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
+
+/** First frame (scene-local) at which a boundary at `ms` is observed. */
+function boundaryFrame(ms: number, fps: number): number {
+  return Math.ceil((ms / 1000) * fps);
 }
 
 function pickSlot(
@@ -63,11 +108,6 @@ function pickSlot(
 
 const CARD_WIDTH = 720; // intrinsic card width before scaling
 
-/**
- * Positions all codeBroll cards in slots (active / related / parked) and
- * animates transitions via spring(). Re-renders are pure: spring math reads
- * frame and previous-slot snapshot from useRef, no React state writes per frame.
- */
 function InlineCodeCard({
   codeBroll,
   isActive,
@@ -154,11 +194,18 @@ function InlineCodeCard({
   );
 }
 
+/**
+ * Positions all codeBroll cards in slots (active / related / parked) and
+ * animates transitions via spring(). Every frame is a pure function of
+ * (frame, props): the current slot AND the last slot-change boundary are
+ * both derived from the resolved binding timeline, so parallel chunked
+ * rendering produces identical frames regardless of chunk boundaries or
+ * machine core count. Springs are anchored at binding-boundary frames.
+ */
 export const CodeCardLayout: React.FC<CodeCardLayoutProps> = ({
   items,
-  activeIndex,
-  relatedIndices,
-  startFrame: _startFrame,
+  bindings,
+  startFrame,
   durationFrames: _durationFrames,
   activeHighlightLines,
   activeHighlightStartMs,
@@ -167,67 +214,52 @@ export const CodeCardLayout: React.FC<CodeCardLayoutProps> = ({
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
 
-  // Slot-per-card state keyed by index, persisted across renders so we know
-  // when a slot actually changed and need to re-anchor the spring.
-  const slotState = useRef<Map<number, CardSlotState>>(new Map());
-
-  // Compute per-card slot decision inline. The previous useMemo had an
-  // unstable `relatedIndices` dependency (fresh array reference from the
-  // parent every render) so the memo never cached — it added overhead with
-  // no benefit. `pickSlot` is O(1) per index over a small `items` array
-  // (≤ MAX_VISIBLE_ARROWS + active), so a direct loop is the cheapest path.
-  const slotByIndex = new Map<number, Slot>();
-  for (let i = 0; i < items.length; i++) {
-    slotByIndex.set(i, pickSlot(i, activeIndex, relatedIndices));
-  }
+  const currentTimeMs = ((frame - startFrame) / fps) * 1000;
+  const segIdx = segmentIndexAt(bindings, currentTimeMs);
+  const seg = segmentState(bindings, segIdx);
 
   return (
     <>
       {items.map((codeBroll, index) => {
-        // `slotByIndex` is populated for every index in `items`, so .get() is
-        // guaranteed defined. Fall back to PARKED_SLOT defensively to satisfy
-        // the no-non-null-assertion lint rule.
-        const targetSlot = slotByIndex.get(index) ?? PARKED_SLOT;
-        const prevState = slotState.current.get(index);
-        // Detect slot change → re-anchor spring.
-        const slotChanged =
-          !prevState ||
-          prevState.current.cx !== targetSlot.cx ||
-          prevState.current.cy !== targetSlot.cy ||
-          prevState.current.scale !== targetSlot.scale ||
-          prevState.current.opacity !== targetSlot.opacity;
-        if (slotChanged) {
-          slotState.current.set(index, {
-            prev: prevState ? prevState.current : targetSlot,
-            current: targetSlot,
-            transitionFrame: frame,
-          });
+        const targetSlot = pickSlot(index, seg.activeIndex, seg.relatedIndices);
+
+        // Walk back through binding-boundary segments to find the most recent
+        // one where this card's slot changed. Loop invariant: this card's slot
+        // in segment j equals targetSlot (trivially true at j = segIdx; each
+        // continue implies segment j-1 also matches). Slots are shared module
+        // constants, so reference equality identifies a change. If the slot
+        // never changed since t=0, prev === target and the spring is a no-op.
+        let prevSlot = targetSlot;
+        let transitionFrame = startFrame;
+        for (let j = segIdx; j >= 0; j--) {
+          const before = segmentState(bindings, j - 1);
+          const slotBefore = pickSlot(index, before.activeIndex, before.relatedIndices);
+          if (slotBefore !== targetSlot) {
+            prevSlot = slotBefore;
+            transitionFrame = startFrame + boundaryFrame(bindings[j].startMs, fps);
+            break;
+          }
         }
-        const state = slotState.current.get(index) ?? {
-          prev: targetSlot,
-          current: targetSlot,
-          transitionFrame: frame,
-        };
 
         const springProgress = spring({
-          frame: frame - state.transitionFrame,
+          frame: Math.max(0, frame - transitionFrame),
           fps,
           config: { damping: 22, mass: 0.7, stiffness: 120 },
         });
 
-        const cx = interpolate(springProgress, [0, 1], [state.prev.cx, state.current.cx]);
-        const cy = interpolate(springProgress, [0, 1], [state.prev.cy, state.current.cy]);
-        const scale = interpolate(springProgress, [0, 1], [state.prev.scale, state.current.scale]);
-        const opacity = interpolate(springProgress, [0, 1], [state.prev.opacity, state.current.opacity]);
+        const cx = interpolate(springProgress, [0, 1], [prevSlot.cx, targetSlot.cx]);
+        const cy = interpolate(springProgress, [0, 1], [prevSlot.cy, targetSlot.cy]);
+        const scale = interpolate(springProgress, [0, 1], [prevSlot.scale, targetSlot.scale]);
+        const opacity = interpolate(springProgress, [0, 1], [prevSlot.opacity, targetSlot.opacity]);
 
         const cardX = cx * width;
         const cardY = cy * height;
 
-        const isActive = index === activeIndex;
+        const isActive = index === seg.activeIndex;
         return (
           <div
             key={index}
-            data-slot={isActive ? "active" : (relatedIndices.includes(index) ? "related" : "parked")}
+            data-slot={isActive ? "active" : (seg.relatedIndices.includes(index) ? "related" : "parked")}
             data-codebroll-index={index}
             style={{
               position: "absolute",

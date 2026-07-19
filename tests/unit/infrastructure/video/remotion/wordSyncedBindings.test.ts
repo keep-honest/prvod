@@ -150,6 +150,17 @@ describe("buildHeuristicBindings", () => {
 // ── resolveBindings ─────────────────────────────────────────────────────
 
 describe("resolveBindings", () => {
+  // Shared console spies for every log-asserting block below. Created once at
+  // collection time — a second vi.spyOn on the same method would shadow the
+  // first spy and stop it from recording calls.
+  const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+  afterEach(() => {
+    consoleWarnSpy.mockClear();
+    consoleDebugSpy.mockClear();
+  });
+
   it("returns empty for no codeBroll", () => {
     const scene = makeScene({ narration: "anything", codeBroll: [] });
     expect(resolveBindings({ scene, wordTimings: makeWordTimings(["any"]) })).toEqual([]);
@@ -260,14 +271,6 @@ describe("resolveBindings", () => {
   // production incident.
 
   describe("heuristic-fallback observability", () => {
-    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
-
-    afterEach(() => {
-      consoleWarnSpy.mockClear();
-      consoleDebugSpy.mockClear();
-    });
-
     it("emits WORD_SYNCED_HEURISTIC_PRODUCED_NO_BINDINGS warn when heuristic returns zero", () => {
       // No backtick identifiers, no basename hits, no camel-cased symbol
       // overlaps → heuristic produces nothing.
@@ -330,6 +333,122 @@ describe("resolveBindings", () => {
         .map(parseLogCall)
         .find((e) => e && e.message === "Word-synced bindings: heuristic produced bindings" && e.sceneNumber === 9);
       expect(debugEntry).toBeDefined();
+    });
+  });
+
+  // ── Sanitization guards: overlaps, OOB highlightLines, timing mismatch ──
+  // Non-runner paths (checkpoint resume of persisted scripts) reach the
+  // resolver without going through validateCodeBindings, so sanitizeBindings
+  // must be deterministic on its own and surface what it changed.
+
+  describe("sanitization guards", () => {
+    it("drops the later-starting overlapping (nested) binding deterministically and warns with OVERLAPPING_CODE_BINDINGS_DROPPED", () => {
+      // Without the guard, findActiveBinding (rightmost startMs, sticky-forward)
+      // would permanently shadow the outer binding once the nested one starts.
+      const scene = makeScene({
+        sceneNumber: 3,
+        narration: "aa bb cc dd ee ff",
+        codeBroll: [cb("x.ts", "x"), cb("y.ts", "y")],
+        codeBindings: [
+          { wordStartIndex: 0, wordEndIndex: 5, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] },
+          { wordStartIndex: 2, wordEndIndex: 3, codeBrollIndex: 1, highlightLines: [], relatesToCodeBrollIndices: [] },
+        ],
+      });
+      const resolved = resolveBindings({
+        scene,
+        wordTimings: makeWordTimings(["aa", "bb", "cc", "dd", "ee", "ff"]),
+      });
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0].codeBrollIndex).toBe(0);
+      expect(resolved[0].wordStartIndex).toBe(0);
+      expect(resolved[0].wordEndIndex).toBe(5);
+
+      const warnEntries = consoleWarnSpy.mock.calls
+        .map(parseLogCall)
+        .filter((e) => e && e.errorTag === "OVERLAPPING_CODE_BINDINGS_DROPPED");
+      expect(warnEntries).toHaveLength(1);
+      expect(warnEntries[0]?.sceneNumber).toBe(3);
+      expect(warnEntries[0]?.droppedBindingCount).toBe(1);
+      expect(warnEntries[0]?.keptBindingCount).toBe(1);
+    });
+
+    it("keeps disjoint bindings intact without an overlap warn", () => {
+      const scene = makeScene({
+        narration: "aa bb cc dd",
+        codeBroll: [cb("x.ts", "x"), cb("y.ts", "y")],
+        codeBindings: [
+          { wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 0, highlightLines: [], relatesToCodeBrollIndices: [] },
+          { wordStartIndex: 2, wordEndIndex: 3, codeBrollIndex: 1, highlightLines: [], relatesToCodeBrollIndices: [] },
+        ],
+      });
+      const resolved = resolveBindings({
+        scene,
+        wordTimings: makeWordTimings(["aa", "bb", "cc", "dd"]),
+      });
+      expect(resolved).toHaveLength(2);
+      const warnEntries = consoleWarnSpy.mock.calls
+        .map(parseLogCall)
+        .filter((e) => e && e.errorTag === "OVERLAPPING_CODE_BINDINGS_DROPPED");
+      expect(warnEntries).toHaveLength(0);
+    });
+
+    it("filters out-of-range highlightLines while keeping the binding, warning with OOB_HIGHLIGHT_LINES_FILTERED", () => {
+      const scene = makeScene({
+        sceneNumber: 5,
+        narration: "alpha beta gamma",
+        codeBroll: [cb("a.ts", "line one\nline two", [10, 11])],
+        codeBindings: [
+          { wordStartIndex: 0, wordEndIndex: 1, codeBrollIndex: 0, highlightLines: [10, 99], relatesToCodeBrollIndices: [] },
+        ],
+      });
+      const resolved = resolveBindings({
+        scene,
+        wordTimings: makeWordTimings(["alpha", "beta", "gamma"]),
+      });
+      // Binding survives — only the OOB line is filtered (mirrors the
+      // runner validator's range logic without dropping the whole binding).
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0].highlightLines).toEqual([10]);
+
+      const warnEntries = consoleWarnSpy.mock.calls
+        .map(parseLogCall)
+        .filter((e) => e && e.errorTag === "OOB_HIGHLIGHT_LINES_FILTERED");
+      expect(warnEntries).toHaveLength(1);
+      expect(warnEntries[0]?.sceneNumber).toBe(5);
+      expect(warnEntries[0]?.filteredLineCount).toBe(1);
+    });
+
+    it("emits WORD_TIMING_TOKEN_COUNT_MISMATCH once per scene with both counts", () => {
+      const scene = makeScene({
+        sceneNumber: 6,
+        narration: "alpha beta gamma",
+        codeBroll: [cb("a.ts", "function alpha() {}")],
+        codeBindings: [],
+      });
+      // 3 narration tokens vs 2 wordTimings — schema declares 1:1 alignment.
+      resolveBindings({ scene, wordTimings: makeWordTimings(["alpha", "beta"]) });
+
+      const warnEntries = consoleWarnSpy.mock.calls
+        .map(parseLogCall)
+        .filter((e) => e && e.errorTag === "WORD_TIMING_TOKEN_COUNT_MISMATCH");
+      expect(warnEntries).toHaveLength(1);
+      expect(warnEntries[0]?.sceneNumber).toBe(6);
+      expect(warnEntries[0]?.tokenCount).toBe(3);
+      expect(warnEntries[0]?.wordTimingCount).toBe(2);
+    });
+
+    it("does not emit WORD_TIMING_TOKEN_COUNT_MISMATCH when counts align", () => {
+      const scene = makeScene({
+        narration: "alpha beta gamma",
+        codeBroll: [cb("a.ts", "function alpha() {}")],
+        codeBindings: [],
+      });
+      resolveBindings({ scene, wordTimings: makeWordTimings(["alpha", "beta", "gamma"]) });
+
+      const warnEntries = consoleWarnSpy.mock.calls
+        .map(parseLogCall)
+        .filter((e) => e && e.errorTag === "WORD_TIMING_TOKEN_COUNT_MISMATCH");
+      expect(warnEntries).toHaveLength(0);
     });
   });
 

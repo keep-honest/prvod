@@ -51,6 +51,16 @@ export interface PRVideoProps extends Record<string, unknown> {
   audioIncluded?: boolean;
   captionOffsetMs?: number;
   graphLayout?: GraphLayoutData;
+  /**
+   * Server-resolved WORD_SYNCED_CODE flag. This component executes inside the
+   * Remotion webpack bundle (headless Chrome) where custom server env vars are
+   * NOT injected — Remotion only exposes REMOTION_-prefixed vars or values
+   * passed via `envVariables`/`inputProps`. RemotionCompositor resolves the
+   * flag server-side and threads it through here (like all other render data).
+   * When absent (Remotion Studio / defaultProps), falls back to reading the
+   * env directly via `isWordSyncedCodeEnabled()`.
+   */
+  wordSyncedCodeEnabled?: boolean;
 }
 
 interface SceneClipProps {
@@ -65,6 +75,7 @@ interface SceneClipProps {
   isFirstScene: boolean;
   isLastScene: boolean;
   graphLayout?: GraphLayoutData;
+  wordSyncedCodeEnabled: boolean;
 }
 
 const SceneClip: React.FC<SceneClipProps> = ({
@@ -79,6 +90,7 @@ const SceneClip: React.FC<SceneClipProps> = ({
   isFirstScene,
   isLastScene,
   graphLayout,
+  wordSyncedCodeEnabled,
 }) => {
   const sceneAudioSrc = sceneTimeline?.audioSrc;
   const sceneWordTimings = sceneTimeline?.wordTimings;
@@ -145,7 +157,7 @@ const SceneClip: React.FC<SceneClipProps> = ({
         // the scene has word timings (genuinely silent scenes fall through
         // to the legacy static overlay since there's no timing source).
         const useWordSync =
-          isWordSyncedCodeEnabled() &&
+          wordSyncedCodeEnabled &&
           scene.codeBroll.length > 0 &&
           (sceneWordTimings?.length ?? 0) > 0;
         if (useWordSync && sceneWordTimings) {
@@ -182,8 +194,13 @@ const PRVideo: React.FC<PRVideoProps> = ({
   audioIncluded,
   captionOffsetMs,
   graphLayout,
+  wordSyncedCodeEnabled,
 }) => {
   let frameOffset = 0;
+  // Render path: server-resolved flag arrives via inputProps. Studio path:
+  // no inputProps → read the env directly (works there because Studio runs
+  // through the dev server, not the sandboxed render bundle).
+  const wordSyncEnabled = wordSyncedCodeEnabled ?? isWordSyncedCodeEnabled();
   const sceneTimelineMap = new Map(
     (sceneTimelineFrames ?? []).map((entry) => [entry.sceneNumber, entry]),
   );
@@ -234,6 +251,7 @@ const PRVideo: React.FC<PRVideoProps> = ({
               isFirstScene={isFirstScene}
               isLastScene={isLastScene}
               graphLayout={graphLayout}
+              wordSyncedCodeEnabled={wordSyncEnabled}
             />
           </Sequence>
         );

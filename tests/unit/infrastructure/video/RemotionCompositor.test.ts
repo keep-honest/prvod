@@ -152,6 +152,42 @@ describe("RemotionCompositor", () => {
     );
   });
 
+  it("threads the server-resolved WORD_SYNCED_CODE flag through inputProps when enabled", async () => {
+    // Root.tsx runs inside the Remotion render bundle (headless Chrome) where
+    // custom server env vars are NOT injected — the flag must travel via
+    // inputProps or enabling it server-side silently renders the legacy overlay.
+    process.env.WORD_SYNCED_CODE = "true";
+    try {
+      const { RemotionCompositor } = await import("@/infrastructure/video/RemotionCompositor");
+      await new RemotionCompositor().compose(makeInput());
+
+      expect(selectCompositionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputProps: expect.objectContaining({ wordSyncedCodeEnabled: true }),
+        }),
+      );
+      expect(renderMediaMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputProps: expect.objectContaining({ wordSyncedCodeEnabled: true }),
+        }),
+      );
+    } finally {
+      delete process.env.WORD_SYNCED_CODE;
+    }
+  });
+
+  it("threads wordSyncedCodeEnabled=false through inputProps when the flag is unset", async () => {
+    delete process.env.WORD_SYNCED_CODE;
+    const { RemotionCompositor } = await import("@/infrastructure/video/RemotionCompositor");
+    await new RemotionCompositor().compose(makeInput());
+
+    expect(renderMediaMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputProps: expect.objectContaining({ wordSyncedCodeEnabled: false }),
+      }),
+    );
+  });
+
   it("falls back to the default port when REMOTION_RENDERER_PORT is unset", async () => {
     delete process.env.REMOTION_RENDERER_PORT;
     const { RemotionCompositor } = await import("@/infrastructure/video/RemotionCompositor");
