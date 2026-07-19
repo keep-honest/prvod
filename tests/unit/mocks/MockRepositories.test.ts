@@ -62,6 +62,17 @@ describe("MockInstallationRepository", () => {
     expect(await repo.findByInstallationId(42)).toBeNull();
   });
 
+  it("findAllActive returns active installations ordered by accountLogin, then installationId", async () => {
+    await repo.upsert({ installationId: 300, accountLogin: "zeta", accountType: "Organization" });
+    await repo.upsert({ installationId: 200, accountLogin: "acme", accountType: "Organization" });
+    await repo.upsert({ installationId: 100, accountLogin: "acme", accountType: "User" });
+    await repo.upsert({ installationId: 400, accountLogin: "midco", accountType: "Organization" });
+    await repo.markStatus(400, "suspended");
+
+    const active = await repo.findAllActive();
+    expect(active.map((i) => i.installationId)).toEqual([100, 200, 300]);
+  });
+
 });
 
 // ── MockApiKeyRepository ────────────────────────────────────────────────────

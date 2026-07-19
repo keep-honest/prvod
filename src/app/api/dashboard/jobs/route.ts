@@ -5,6 +5,15 @@ import { createLogger } from "@/lib/logger";
 import { eq, desc, inArray, and, sql } from "drizzle-orm";
 import { getDb } from "@/infrastructure/persistence/db";
 import { videoJobs } from "@/infrastructure/persistence/schema";
+import {
+  STATUS_FILTER_MAP,
+  clampLimit,
+  clampPage,
+  hasMorePages,
+  resolveStatusFilter,
+  toJobSummary,
+  type JobSummary,
+} from "@/app/dashboard/jobSummary";
 
 const logger = createLogger("dashboard/jobs");
 
@@ -13,27 +22,6 @@ const NO_STORE_HEADERS = {
 };
 
 export const dynamic = "force-dynamic";
-
-interface JobSummary {
-  id: string;
-  status: string;
-  currentStage: string | null;
-  repoFullName: string;
-  prNumber: number;
-  prTitle: string;
-  createdAt: string;
-  completedAt: string | null;
-  hasReview: boolean;
-  elapsedMs: number | null;
-  errorCode: string | null;
-}
-
-const STATUS_FILTER_MAP: Record<string, string[]> = {
-  in_progress: ["queued", "processing"],
-  completed: ["completed"],
-  failed: ["failed", "cancelled"],
-  all: ["queued", "processing", "completed", "failed", "cancelled"],
-};
 
 /**
  * GET /api/dashboard/jobs
@@ -45,11 +33,12 @@ export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const orgParam = searchParams.get("org");
   const statusFilter = searchParams.get("status") ?? "all";
-  const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") ?? "20", 10) || 20));
+  const page = clampPage(searchParams.get("page"));
+  const limit = clampLimit(searchParams.get("limit"));
   const offset = (page - 1) * limit;
 
-  if (!STATUS_FILTER_MAP[statusFilter]) {
+  const dbStatuses = resolveStatusFilter(statusFilter);
+  if (!dbStatuses) {
     return NextResponse.json(
       { error: "INVALID_STATUS", message: `status must be one of: ${Object.keys(STATUS_FILTER_MAP).join(", ")}` },
       { status: 400, headers: NO_STORE_HEADERS },
@@ -93,7 +82,6 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const dbStatuses = STATUS_FILTER_MAP[statusFilter];
   const conditions = [
     eq(videoJobs.installationRef, installation.id),
     inArray(videoJobs.status, dbStatuses),
@@ -129,30 +117,7 @@ export async function GET(request: NextRequest) {
   const total = countResult[0]?.count ?? 0;
   const now = Date.now();
 
-  const jobs: JobSummary[] = rows.map((row) => {
-    const metrics = row.metricsJson as Record<string, unknown> | null;
-    const prTitle =
-      (metrics?.prTitle as string) ??
-      (metrics?.title as string) ??
-      `#${row.prNumber}`;
-
-    const isInProgress = row.status === "queued" || row.status === "processing";
-    const elapsedMs = isInProgress ? now - row.createdAt.getTime() : null;
-
-    return {
-      id: row.id,
-      status: row.status,
-      currentStage: row.currentStage ?? null,
-      repoFullName: row.repoFullName,
-      prNumber: row.prNumber,
-      prTitle,
-      createdAt: row.createdAt.toISOString(),
-      completedAt: row.completedAt?.toISOString() ?? null,
-      hasReview: row.scriptJson !== null,
-      elapsedMs,
-      errorCode: row.errorCode,
-    };
-  });
+  const jobs: JobSummary[] = rows.map((row) => toJobSummary(row, now));
 
   logger.info("Jobs list returned", {
     org: installation.accountLogin,
@@ -166,6 +131,6 @@ export async function GET(request: NextRequest) {
     total,
     page,
     limit,
-    hasMore: offset + limit < total,
+    hasMore: hasMorePages(offset, limit, total),
   }, { headers: NO_STORE_HEADERS });
 }

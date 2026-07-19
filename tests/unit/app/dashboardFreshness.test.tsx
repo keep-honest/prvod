@@ -105,6 +105,26 @@ describe("dashboard freshness", () => {
     await unmount(root);
   });
 
+  it("shows an empty-accounts state when the org list is empty", async () => {
+    const { DashboardSidebar } = await import("@/app/dashboard/_components/DashboardSidebar");
+    const { container, root } = await render(
+      <DashboardSidebar organizations={[]} />,
+    );
+    expect(container.textContent).toContain("No accounts");
+    expect(container.textContent).not.toContain("load accounts");
+    await unmount(root);
+  });
+
+  it("shows a load-failure state when organizations is null", async () => {
+    const { DashboardSidebar } = await import("@/app/dashboard/_components/DashboardSidebar");
+    const { container, root } = await render(
+      <DashboardSidebar organizations={null} />,
+    );
+    expect(container.textContent).toContain("load accounts");
+    expect(container.textContent).not.toContain("No accounts");
+    await unmount(root);
+  });
+
 });
 
 describe("JobCard error rendering", () => {
@@ -316,6 +336,75 @@ describe("WalkthroughJobsPoller", () => {
     });
 
     expect(container.textContent).toContain("In Progress (1)");
+    await unmount(root);
+  });
+
+  it("keeps the current snapshot when the response jobs field is not an array", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ jobs: "not-an-array" }),
+    } as Response);
+
+    const { WalkthroughJobsPoller, WALKTHROUGH_JOBS_POLL_INTERVAL_MS } = await import(
+      "@/app/dashboard/_components/WalkthroughJobsPoller"
+    );
+    const { container, root } = await render(
+      <WalkthroughJobsPoller initialJobs={[baseJob]} orgInstallationId={123} />,
+    );
+
+    await act(async () => {
+      vi.advanceTimersByTime(WALKTHROUGH_JOBS_POLL_INTERVAL_MS * 3);
+      await Promise.resolve();
+    });
+
+    // Snapshot retained — the poller must not wipe jobs on contract drift.
+    expect(container.textContent).toContain("In Progress (1)");
+    warnSpy.mockRestore();
+    await unmount(root);
+  });
+
+  it("shows a stale banner after repeated failures and clears it on success", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockRejectedValue(new Error("network down"));
+
+    const { WalkthroughJobsPoller, WALKTHROUGH_JOBS_POLL_INTERVAL_MS } = await import(
+      "@/app/dashboard/_components/WalkthroughJobsPoller"
+    );
+    const { container, root } = await render(
+      <WalkthroughJobsPoller initialJobs={[baseJob]} orgInstallationId={123} />,
+    );
+
+    // Below threshold: no banner yet (mount poll = 1 failure).
+    expect(container.querySelector("[data-testid='poll-stale-banner']")).toBeNull();
+
+    await act(async () => {
+      vi.advanceTimersByTime(WALKTHROUGH_JOBS_POLL_INTERVAL_MS * 3);
+      await Promise.resolve();
+    });
+
+    const banner = container.querySelector("[data-testid='poll-stale-banner']");
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain("Live updates paused");
+    // Jobs stay visible alongside the banner.
+    expect(container.textContent).toContain("In Progress (1)");
+
+    // Recovery: next successful poll clears the banner.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ jobs: [baseJob] }),
+    } as Response);
+
+    await act(async () => {
+      vi.advanceTimersByTime(WALKTHROUGH_JOBS_POLL_INTERVAL_MS);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector("[data-testid='poll-stale-banner']")).toBeNull();
+    expect(container.textContent).toContain("In Progress (1)");
+    warnSpy.mockRestore();
     await unmount(root);
   });
 

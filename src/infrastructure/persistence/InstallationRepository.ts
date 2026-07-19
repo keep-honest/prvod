@@ -1,4 +1,4 @@
-import { eq, and, inArray, sql } from "drizzle-orm";
+import { eq, and, asc, inArray, sql } from "drizzle-orm";
 import { getDb } from "@/infrastructure/persistence/db";
 import { githubInstallations, installationRepositories } from "@/infrastructure/persistence/schema";
 import { createLogger } from "@/lib/logger";
@@ -81,10 +81,13 @@ export class InstallationRepository implements IInstallationRepository {
   async findAllActive(): Promise<InstallationRecord[]> {
     logger.debug("Finding all active installations");
 
+    // Deterministic order: dashboard layout, pages, and API routes each take
+    // [0] as the default org, so an unordered result would let them disagree.
     const rows = await this.db
       .select()
       .from(githubInstallations)
-      .where(eq(githubInstallations.status, "active"));
+      .where(eq(githubInstallations.status, "active"))
+      .orderBy(asc(githubInstallations.accountLogin), asc(githubInstallations.installationId));
 
     return rows.map(rowToRecord);
   }

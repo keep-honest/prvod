@@ -5,7 +5,8 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { OrgEntry } from "@/app/dashboard/orgEntry";
 
 interface OrgSwitcherProps {
-  organizations: OrgEntry[];
+  /** null = installation load failed (distinct from [] = no accounts) */
+  organizations: OrgEntry[] | null;
 }
 
 function orgDisplayName(org: { orgLogin: string | null; accountType: string } | null | undefined): string {
@@ -19,10 +20,11 @@ export function OrgSwitcher({ organizations }: OrgSwitcherProps) {
   const pathname = usePathname();
 
   const selectedOrgId = searchParams.get("org");
-  const selectedOrg = organizations.find(
+  const orgList = organizations ?? [];
+  const selectedOrg = orgList.find(
     (o) => String(o.installationId) === selectedOrgId,
   );
-  const displayOrg = selectedOrg ?? organizations[0] ?? null;
+  const displayOrg = selectedOrg ?? orgList[0] ?? null;
 
   function selectOrg(installationId: number) {
     const params = new URLSearchParams(searchParams.toString());
@@ -30,7 +32,18 @@ export function OrgSwitcher({ organizations }: OrgSwitcherProps) {
     router.push(`${pathname}?${params.toString()}`);
   }
 
-  if (organizations.length === 0) {
+  if (organizations === null) {
+    return (
+      <div
+        role="alert"
+        className="rounded-md bg-[var(--danger)]/10 px-3 py-2 text-sm text-[var(--danger)]"
+      >
+        Couldn&apos;t load accounts
+      </div>
+    );
+  }
+
+  if (orgList.length === 0) {
     return (
       <div className="rounded-md bg-[var(--background-panel)] px-3 py-2 text-sm text-[var(--foreground-soft)]">
         No accounts
@@ -38,7 +51,7 @@ export function OrgSwitcher({ organizations }: OrgSwitcherProps) {
     );
   }
 
-  if (organizations.length === 1) {
+  if (orgList.length === 1) {
     return (
       <div className="flex items-center gap-2 rounded-md bg-[var(--background-panel)] px-3 py-2">
         <OrgAvatar name={displayOrg?.orgLogin ?? "?"} />
@@ -70,7 +83,7 @@ export function OrgSwitcher({ organizations }: OrgSwitcherProps) {
           align="start"
           className="z-50 min-w-[200px] rounded-lg border border-[var(--border)] bg-[var(--background-elevated)] p-1 shadow-lg"
         >
-          {organizations.map((org) => {
+          {orgList.map((org) => {
             const isSelected =
               org === displayOrg ||
               String(org.installationId) === selectedOrgId;

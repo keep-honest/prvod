@@ -58,22 +58,40 @@ export function ShareDialog({ jobId, open, onOpenChange }: ShareDialogProps) {
     }
   }
 
+  function markCopied() {
+    setState((prev) => ({ ...prev, copied: true, error: null }));
+    setTimeout(() => setState((prev) => ({ ...prev, copied: false })), 2000);
+  }
+
   async function copyToClipboard() {
     if (!state.url) return;
+    const url = state.url;
     try {
-      await navigator.clipboard.writeText(state.url);
-      setState((prev) => ({ ...prev, copied: true }));
-      setTimeout(() => setState((prev) => ({ ...prev, copied: false })), 2000);
+      await navigator.clipboard.writeText(url);
+      markCopied();
     } catch {
-      // Fallback for older browsers
-      const textarea = document.createElement("textarea");
-      textarea.value = state.url;
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-      setState((prev) => ({ ...prev, copied: true }));
-      setTimeout(() => setState((prev) => ({ ...prev, copied: false })), 2000);
+      // Fallback for older browsers — execCommand returns false when the
+      // copy was refused, so only report success when it actually copied.
+      let succeeded = false;
+      try {
+        const textarea = document.createElement("textarea");
+        textarea.value = url;
+        document.body.appendChild(textarea);
+        textarea.select();
+        succeeded = document.execCommand("copy");
+        textarea.remove();
+      } catch {
+        succeeded = false;
+      }
+      if (succeeded) {
+        markCopied();
+      } else {
+        setState((prev) => ({
+          ...prev,
+          copied: false,
+          error: "Copy failed — select the link and copy it manually",
+        }));
+      }
     }
   }
 

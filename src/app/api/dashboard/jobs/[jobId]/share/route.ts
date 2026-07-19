@@ -55,7 +55,20 @@ export async function GET(
 
   const service = new ShareLinkService(container.jobRepository, secret);
 
-  const result = await service.generateLink(jobId, shareType, baseUrl);
+  let result;
+  try {
+    result = await service.generateLink(jobId, shareType, baseUrl);
+  } catch (err) {
+    logger.error("Share link generation failed", {
+      jobId,
+      shareType,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      { error: "INTERNAL_ERROR", message: "Failed to generate share link" },
+      { status: 500 },
+    );
+  }
 
   if (!result) {
     return NextResponse.json(

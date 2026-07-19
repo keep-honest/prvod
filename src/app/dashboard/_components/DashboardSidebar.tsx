@@ -7,7 +7,8 @@ import { OrgSwitcher } from "./OrgSwitcher";
 import type { OrgEntry } from "@/app/dashboard/orgEntry";
 
 interface DashboardSidebarProps {
-  organizations: OrgEntry[];
+  /** null = installation load failed (distinct from [] = no accounts) */
+  organizations: OrgEntry[] | null;
 }
 
 const NAV_ITEMS = [

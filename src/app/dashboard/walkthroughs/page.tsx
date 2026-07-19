@@ -7,6 +7,7 @@ import {
   WalkthroughJobsPoller,
   type DashboardJob,
 } from "@/app/dashboard/_components/WalkthroughJobsPoller";
+import { toJobSummary } from "@/app/dashboard/jobSummary";
 
 const logger = createLogger("dashboard/walkthroughs/page");
 
@@ -56,28 +57,7 @@ export default async function WalkthroughsPage({ searchParams }: WalkthroughsPag
       .limit(50);
 
     const now = Date.now();
-    const jobs: DashboardJob[] = rows.map((row) => {
-      const metrics = row.metricsJson as Record<string, unknown> | null;
-      const prTitle =
-        (metrics?.prTitle as string) ??
-        (metrics?.title as string) ??
-        `#${row.prNumber}`;
-      const isInProgress = row.status === "queued" || row.status === "processing";
-
-      return {
-        id: row.id,
-        status: row.status,
-        currentStage: row.currentStage ?? null,
-        repoFullName: row.repoFullName,
-        prNumber: row.prNumber,
-        prTitle,
-        createdAt: row.createdAt.toISOString(),
-        completedAt: row.completedAt?.toISOString() ?? null,
-        hasReview: row.scriptJson !== null,
-        elapsedMs: isInProgress ? now - row.createdAt.getTime() : null,
-        errorCode: row.errorCode,
-      };
-    });
+    const jobs: DashboardJob[] = rows.map((row) => toJobSummary(row, now));
 
     return (
       <div className="mx-auto max-w-3xl">

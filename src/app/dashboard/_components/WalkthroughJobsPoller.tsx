@@ -43,6 +43,7 @@ export function WalkthroughJobsPoller({
   orgInstallationId,
 }: WalkthroughJobsPollerProps) {
   const [jobs, setJobs] = useState<DashboardJob[]>(initialJobs);
+  const [stale, setStale] = useState(false);
   const failureCountRef = useRef(0);
 
   // Re-seed only when the selected org changes; within the same org the client
@@ -51,6 +52,7 @@ export function WalkthroughJobsPoller({
   useEffect(() => {
     setJobs(initialJobs);
     failureCountRef.current = 0;
+    setStale(false);
   }, [orgInstallationId]);
 
   const recordFailure = useCallback((kind: string, detail: Record<string, unknown>) => {
@@ -63,6 +65,9 @@ export function WalkthroughJobsPoller({
         ...detail,
         consecutiveFailures: count,
       });
+    }
+    if (count >= POLL_FAILURE_LOG_THRESHOLD) {
+      setStale(true);
     }
   }, []);
 
@@ -89,9 +94,17 @@ export function WalkthroughJobsPoller({
     }
 
     try {
-      const data = (await res.json()) as { jobs?: DashboardJob[] };
+      const data = (await res.json()) as { jobs?: unknown };
+      if (!Array.isArray(data.jobs)) {
+        // Contract drift: keep the current snapshot rather than wiping it.
+        recordFailure("poll response missing jobs array", {
+          jobsType: typeof data.jobs,
+        });
+        return;
+      }
       failureCountRef.current = 0;
-      setJobs(data.jobs ?? []);
+      setStale(false);
+      setJobs(data.jobs as DashboardJob[]);
     } catch (err) {
       recordFailure("poll response parse error", {
         error: err instanceof Error ? err.message : String(err),
@@ -118,21 +131,35 @@ export function WalkthroughJobsPoller({
 
   const sections = useMemo(() => groupDashboardJobs(jobs), [jobs]);
 
+  const staleBanner = stale ? (
+    <div
+      role="status"
+      data-testid="poll-stale-banner"
+      className="mb-4 rounded-lg border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-xs text-[var(--warning)]"
+    >
+      Live updates paused &mdash; retrying&hellip;
+    </div>
+  ) : null;
+
   if (jobs.length === 0) {
     return (
-      <div className="rounded-xl border border-[var(--border)] bg-[var(--background-panel)] p-10 text-center">
-        <p className="mb-2 text-lg font-medium text-[var(--foreground)]">
-          No walkthroughs yet
-        </p>
-        <p className="text-sm text-[var(--foreground-muted)]">
-          Open a pull request on a repository where PrVod is installed to generate your first walkthrough.
-        </p>
-      </div>
+      <>
+        {staleBanner}
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--background-panel)] p-10 text-center">
+          <p className="mb-2 text-lg font-medium text-[var(--foreground)]">
+            No walkthroughs yet
+          </p>
+          <p className="text-sm text-[var(--foreground-muted)]">
+            Open a pull request on a repository where PrVod is installed to generate your first walkthrough.
+          </p>
+        </div>
+      </>
     );
   }
 
   return (
     <>
+      {staleBanner}
       {sections.inProgress.length > 0 && (
         <section className="mb-8">
           <h2 className="mb-3 text-sm font-medium uppercase tracking-wider text-[var(--foreground-soft)]">

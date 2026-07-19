@@ -10,7 +10,8 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  let organizations: OrgEntry[] = [];
+  // null = load failed (distinct from [] = fresh install with no accounts)
+  let organizations: OrgEntry[] | null = null;
 
   try {
     const container = await getContainer();

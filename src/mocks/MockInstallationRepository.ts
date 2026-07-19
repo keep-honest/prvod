@@ -49,7 +49,15 @@ export class MockInstallationRepository implements IInstallationRepository {
   }
 
   async findAllActive(): Promise<InstallationRecord[]> {
-    return this.installations.filter((i) => i.status === "active");
+    // Mirror the real repository's deterministic ordering (accountLogin,
+    // then installationId) so consumers relying on [0] behave identically.
+    return this.installations
+      .filter((i) => i.status === "active")
+      .sort(
+        (a, b) =>
+          a.accountLogin.localeCompare(b.accountLogin) ||
+          a.installationId - b.installationId,
+      );
   }
 
   async findByAccountLogins(accountLogins: string[]): Promise<InstallationRecord[]> {
