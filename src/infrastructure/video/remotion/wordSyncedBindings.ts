@@ -369,20 +369,18 @@ export function resolveBindings(args: {
 }
 
 /**
- * Given `currentTimeMs`, return the binding whose [startMs, endMs] range
- * contains it. If none, return the MOST RECENT past binding (sticky-forward
- * for visual continuity — the previous snippet stays visible during un-bound
- * narration). Returns null only when no past binding exists yet.
+ * Index-returning core of {@link findActiveBinding}: rightmost binding whose
+ * `startMs <= currentTimeMs` (binary search over the sorted list), or -1 when
+ * the first binding is still in the future.
  *
- * Binary search over the sorted list.
+ * Exported so the card-slot/transition derivation (`cardTransitions.ts`)
+ * shares the exact same sticky-forward search — the stage's active-binding
+ * lookup and the layout's segment lookup can never diverge.
  */
-export function findActiveBinding(
+export function findActiveBindingIndex(
   resolved: ResolvedBinding[],
   currentTimeMs: number,
-): ResolvedBinding | null {
-  if (resolved.length === 0) return null;
-
-  // Find the rightmost binding whose startMs <= currentTimeMs.
+): number {
   let lo = 0;
   let hi = resolved.length - 1;
   let candidateIdx = -1;
@@ -395,6 +393,20 @@ export function findActiveBinding(
       hi = mid - 1;
     }
   }
+  return candidateIdx;
+}
+
+/**
+ * Given `currentTimeMs`, return the binding whose [startMs, endMs] range
+ * contains it. If none, return the MOST RECENT past binding (sticky-forward
+ * for visual continuity — the previous snippet stays visible during un-bound
+ * narration). Returns null only when no past binding exists yet.
+ */
+export function findActiveBinding(
+  resolved: ResolvedBinding[],
+  currentTimeMs: number,
+): ResolvedBinding | null {
+  const candidateIdx = findActiveBindingIndex(resolved, currentTimeMs);
   if (candidateIdx === -1) return null;
   return resolved[candidateIdx];
 }

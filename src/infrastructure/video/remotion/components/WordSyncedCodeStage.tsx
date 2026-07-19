@@ -6,7 +6,12 @@ import {
   resolveBindings,
   findActiveBinding,
 } from "@/infrastructure/video/remotion/wordSyncedBindings";
-import { CodeCardLayout, MAX_VISIBLE_ARROWS } from "@/infrastructure/video/remotion/components/CodeCardLayout";
+import { CodeCardLayout } from "@/infrastructure/video/remotion/components/CodeCardLayout";
+import {
+  ACTIVE_SLOT,
+  RELATED_SLOTS,
+  MAX_VISIBLE_ARROWS,
+} from "@/infrastructure/video/remotion/cardTransitions";
 import { ConnectionArrow } from "@/infrastructure/video/remotion/components/ConnectionArrow";
 
 interface WordSyncedCodeStageProps {
@@ -16,17 +21,6 @@ interface WordSyncedCodeStageProps {
   startFrame: number;
   durationFrames: number;
 }
-
-// Same normalized slot coordinates CodeCardLayout uses, exported here so
-// arrows can compute screen-space endpoints between cards in matching slots.
-// Keeping them in sync via a single source of truth would be cleaner — left
-// as a follow-up; current placement matches CodeCardLayout exactly.
-const SLOT_COORDS: Record<"active" | "related0" | "related1" | "related2", { cx: number; cy: number }> = {
-  active: { cx: 0.5, cy: 0.5 },
-  related0: { cx: 0.82, cy: 0.28 },
-  related1: { cx: 0.82, cy: 0.72 },
-  related2: { cx: 0.18, cy: 0.5 },
-};
 
 /**
  * Top-level word-synced code stage. Per frame, derives the active binding
@@ -56,15 +50,19 @@ export const WordSyncedCodeStage: React.FC<WordSyncedCodeStageProps> = ({
   // from the resolved timeline; these are only for arrows and highlights.
   const relatedIndices = (active?.relatesToCodeBrollIndices ?? []).slice(0, MAX_VISIBLE_ARROWS);
 
-  // Arrows from the active card center to each related card center.
-  const arrows = relatedIndices.map((relatedIdx, slotPos) => {
-    const slotKey = (`related${slotPos}` as keyof typeof SLOT_COORDS);
-    const toSlot = SLOT_COORDS[slotKey];
-    return {
-      relatedIdx,
-      from: { x: SLOT_COORDS.active.cx * width, y: SLOT_COORDS.active.cy * height },
-      to: { x: toSlot.cx * width, y: toSlot.cy * height },
-    };
+  // Arrows from the active card center to each related card center. Slot
+  // coordinates come from the shared cardTransitions constants — the same
+  // ones CodeCardLayout positions cards with — so endpoints always match.
+  const arrows = relatedIndices.flatMap((relatedIdx, slotPos) => {
+    const toSlot = RELATED_SLOTS[slotPos];
+    if (!toSlot) return []; // relatedIndices is capped at MAX_VISIBLE_ARROWS, but guard anyway
+    return [
+      {
+        relatedIdx,
+        from: { x: ACTIVE_SLOT.cx * width, y: ACTIVE_SLOT.cy * height },
+        to: { x: toSlot.cx * width, y: toSlot.cy * height },
+      },
+    ];
   });
 
   return (

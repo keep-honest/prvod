@@ -188,6 +188,72 @@ describe("RemotionCompositor", () => {
     );
   });
 
+  it("passes an onBrowserLog forwarder to both selectComposition and renderMedia", async () => {
+    // Bundle-side logger output (resolver warns like
+    // WORD_TIMING_TOKEN_COUNT_MISMATCH) lands in headless Chrome's console;
+    // without onBrowserLog it never reaches server logs.
+    const { RemotionCompositor } = await import("@/infrastructure/video/RemotionCompositor");
+    await new RemotionCompositor().compose(makeInput());
+
+    expect(selectCompositionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ onBrowserLog: expect.any(Function) }),
+    );
+    expect(renderMediaMock).toHaveBeenCalledWith(
+      expect.objectContaining({ onBrowserLog: expect.any(Function) }),
+    );
+  });
+
+  it("re-logs errorTag-bearing bundle log lines server-side, deduped per (errorTag, sceneNumber)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const bundleLine = JSON.stringify({
+        timestamp: "2026-07-19T00:00:00.000Z",
+        level: "warn",
+        message: "Word-synced bindings: heuristic produced no bindings",
+        requestId: "wordSyncedBindings",
+        errorTag: "WORD_SYNCED_HEURISTIC_PRODUCED_NO_BINDINGS",
+        sceneNumber: 2,
+      });
+
+      renderMediaMock.mockReset();
+      renderMediaMock.mockImplementation(
+        async ({ outputLocation, onBrowserLog }: {
+          outputLocation: string;
+          onBrowserLog: (log: { text: string; stackTrace: unknown[]; type: string }) => void;
+        }) => {
+          // Simulate the headless browser emitting the same once-per-scene
+          // warn from two render chunks, plus unrelated browser noise.
+          onBrowserLog({ text: bundleLine, stackTrace: [], type: "warning" });
+          onBrowserLog({ text: bundleLine, stackTrace: [], type: "warning" });
+          onBrowserLog({ text: "Download the React DevTools", stackTrace: [], type: "log" });
+          await fs.writeFile(outputLocation, Buffer.from("video"));
+        },
+      );
+
+      const { RemotionCompositor } = await import("@/infrastructure/video/RemotionCompositor");
+      await new RemotionCompositor().compose(makeInput());
+
+      const forwarded = warnSpy.mock.calls
+        .map((call) => {
+          try {
+            return JSON.parse(call[0] as string) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .filter((e) => e && e.errorTag === "WORD_SYNCED_HEURISTIC_PRODUCED_NO_BINDINGS");
+      expect(forwarded).toHaveLength(1);
+      expect(forwarded[0]).toMatchObject({
+        level: "warn",
+        message: "Word-synced bindings: heuristic produced no bindings",
+        sceneNumber: 2,
+        source: "remotion-bundle",
+      });
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("falls back to the default port when REMOTION_RENDERER_PORT is unset", async () => {
     delete process.env.REMOTION_RENDERER_PORT;
     const { RemotionCompositor } = await import("@/infrastructure/video/RemotionCompositor");

@@ -13,6 +13,7 @@ import type {
 import { parseCaptionOffsetMs } from "@/infrastructure/video/ffmpeg/parseCaptionOffsetMs";
 import { isWordSyncedCodeEnabled } from "@/lib/featureFlags";
 import { computeTotalFrames, downloadAsset, cleanupDirs } from "@/infrastructure/video/compositorUtils";
+import { createBrowserLogForwarder } from "@/infrastructure/video/remotionBrowserLogs";
 import {
   resolveRemotionRendererPort,
   withRemotionRendererLock,
@@ -325,6 +326,17 @@ export class RemotionCompositor implements IVideoCompositor {
       // on multi-core Linux hosts (Render production target).
       const chromiumOptions = { enableMultiProcessOnLinux: true } as const;
 
+      // Forward structured warns/errors emitted INSIDE the render bundle
+      // (headless Chrome) to server logs. The bundle's shared logger writes
+      // JSON lines to the browser console, which Remotion only surfaces via
+      // onBrowserLog — without this callback, resolver warns such as
+      // WORD_TIMING_TOKEN_COUNT_MISMATCH never reach production logs.
+      // One forwarder per render: dedupe by (errorTag, sceneNumber) spans
+      // selectComposition + renderMedia, absorbing per-chunk remount repeats.
+      const onBrowserLog = createBrowserLogForwarder((level, message, context) =>
+        logger[level](message, context),
+      );
+
       const videoBuffer = await withRemotionRendererLock(async () => {
         const rendererPort = resolveRemotionRendererPort();
 
@@ -351,6 +363,7 @@ export class RemotionCompositor implements IVideoCompositor {
           inputProps: compositionInputProps,
           port: rendererPort,
           chromiumOptions,
+          onBrowserLog,
         });
 
         logger.info("Rendering video", {
@@ -368,6 +381,7 @@ export class RemotionCompositor implements IVideoCompositor {
           inputProps: compositionInputProps,
           port: rendererPort,
           chromiumOptions,
+          onBrowserLog,
           onProgress: ({ progress }) => {
             if (Math.round(progress * 100) % 25 === 0) {
               logger.debug("Render progress", { progress: Math.round(progress * 100) });
